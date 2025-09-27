@@ -8,7 +8,7 @@ use cosmic::widget::{self, settings};
 use cosmic::{Application, Element};
 
 use crate::fl;
-use crate::core::openvpn::{get_openvpn_profiles, is_openvpn3_available, delete_openvpn_profile, is_profile_session_active, disconnect_openvpn_session, OpenVPNProfile};
+use crate::core::openvpn::{get_openvpn_profiles, is_openvpn3_available, delete_openvpn_profile, is_profile_session_active, disconnect_openvpn_session, import_openvpn_config, OpenVPNProfile};
 
 /// This is the struct that represents your application.
 /// It is used to define the data that will be used by your application.
@@ -24,6 +24,12 @@ pub struct OpenVpn3Status {
     openvpn_profiles: Vec<OpenVPNProfile>,
     /// Whether OpenVPN 3 is available on the system.
     openvpn3_available: bool,
+    /// Import dialog popup id.
+    import_dialog: Option<Id>,
+    /// File path for import dialog.
+    import_file_path: String,
+    /// Custom name for import dialog.
+    import_custom_name: String,
 }
 
 /// This is the enum that contains all the possible variants that your application will need to transmit messages.
@@ -37,6 +43,12 @@ pub enum Message {
     DeleteProfile(String), // Profile name to delete
     DisconnectSession(String), // Profile name to disconnect
     RefreshProfiles, // Refresh OpenVPN profiles and session status
+    ImportConfig, // Open import dialog
+    ImportDialogClosed(Id), // Import dialog was closed
+    ImportFilePathChanged(String), // File path input changed
+    ImportCustomNameChanged(String), // Custom name input changed
+    ImportConfigSubmit, // Submit the import form
+    ConfigImported(String, Option<String>), // Config file path and custom name that was imported
 }
 
 /// Implement the `Application` trait for your application.
@@ -120,21 +132,29 @@ impl Application for OpenVpn3Status {
 
         // Add OpenVPN 3 profiles if available
         if self.openvpn3_available {
+            // Always add header for profiles section with refresh and import buttons
+            let refresh_button = widget::button::icon(widget::icon::from_name("view-refresh-symbolic"))
+                .on_press(Message::RefreshProfiles);
+            let import_button = widget::button::icon(widget::icon::from_name("document-open-symbolic"))
+                .on_press(Message::ImportConfig);
+            
+            // Create a row with both buttons
+            let button_row = widget::row()
+                .push(refresh_button)
+                .push(import_button)
+                .spacing(5);
+            
+            content_list = content_list.add(settings::item(
+                "OpenVPN 3 Profiles",
+                button_row,
+            ));
+            
             if self.openvpn_profiles.is_empty() {
                 content_list = content_list.add(settings::item(
-                    "OpenVPN 3 Profiles",
+                    "Profiles",
                     widget::text("No profiles found"),
                 ));
             } else {
-                // Add header for profiles section with refresh button
-                let refresh_button = widget::button::icon(widget::icon::from_name("view-refresh-symbolic"))
-                    .on_press(Message::RefreshProfiles);
-                
-                content_list = content_list.add(settings::item(
-                    "OpenVPN 3 Profiles",
-                    refresh_button,
-                ));
-                
                 // Add each profile
                 for profile in &self.openvpn_profiles {
                     let is_active = is_profile_session_active(&profile.name);
@@ -167,7 +187,17 @@ impl Application for OpenVpn3Status {
             ));
         }
 
-        self.core.applet.popup_container(content_list).into()
+        // Add import dialog content to the main list if open
+        let mut final_content_list = content_list;
+        if let Some(import_dialog_id) = self.import_dialog {
+            let import_dialog = self.view_import_dialog(import_dialog_id);
+            final_content_list = final_content_list.add(settings::item(
+                "Import Dialog",
+                import_dialog,
+            ));
+        }
+        
+        self.core.applet.popup_container(final_content_list).into()
     }
 
     /// Application messages are handled here. The application state can be modified based on
@@ -240,11 +270,105 @@ impl Application for OpenVpn3Status {
                     eprintln!("Refreshed OpenVPN profiles: {} profiles found", self.openvpn_profiles.len());
                 }
             }
+            Message::ImportConfig => {
+                // Open import dialog
+                let import_dialog_id = Id::unique();
+                self.import_dialog = Some(import_dialog_id);
+                self.import_file_path.clear();
+                self.import_custom_name.clear();
+                eprintln!("Opening import dialog");
+            }
+            Message::ImportDialogClosed(id) => {
+                if self.import_dialog == Some(id) {
+                    self.import_dialog = None;
+                }
+            }
+            Message::ImportFilePathChanged(path) => {
+                self.import_file_path = path;
+            }
+            Message::ImportCustomNameChanged(name) => {
+                self.import_custom_name = name;
+            }
+            Message::ImportConfigSubmit => {
+                if !self.import_file_path.trim().is_empty() {
+                    let custom_name = if self.import_custom_name.trim().is_empty() {
+                        None
+                    } else {
+                        Some(self.import_custom_name.trim())
+                    };
+                    // Close the dialog
+                    self.import_dialog = None;
+                    // Import the config
+                    match import_openvpn_config(&self.import_file_path, custom_name) {
+                        Ok(profile_name) => {
+                            eprintln!("Successfully imported config '{}' as profile '{}'", self.import_file_path, profile_name);
+                            // Refresh the profiles list to show the new profile
+                            if self.openvpn3_available {
+                                self.openvpn_profiles = get_openvpn_profiles().unwrap_or_default();
+                            }
+                        }
+                        Err(error) => {
+                            eprintln!("Failed to import config '{}': {}", self.import_file_path, error);
+                        }
+                    }
+                }
+            }
+            Message::ConfigImported(config_path, custom_name) => {
+                // Handle imported config file with custom name
+                match import_openvpn_config(&config_path, custom_name.as_deref()) {
+                    Ok(profile_name) => {
+                        eprintln!("Successfully imported config '{}' as profile '{}'", config_path, profile_name);
+                        // Refresh the profiles list to show the new profile
+                        if self.openvpn3_available {
+                            self.openvpn_profiles = get_openvpn_profiles().unwrap_or_default();
+                        }
+                    }
+                    Err(error) => {
+                        eprintln!("Failed to import config '{}': {}", config_path, error);
+                    }
+                }
+            }
         }
         Task::none()
     }
 
+
     fn style(&self) -> Option<cosmic::iced_runtime::Appearance> {
         Some(cosmic::applet::style())
+    }
+}
+
+impl OpenVpn3Status {
+    /// View for the import dialog
+    fn view_import_dialog(&self, id: Id) -> Element<Message> {
+        let file_path_input = widget::text_input("File path", &self.import_file_path)
+            .on_input(Message::ImportFilePathChanged);
+        
+        let custom_name_input = widget::text_input("Custom name (optional)", &self.import_custom_name)
+            .on_input(Message::ImportCustomNameChanged);
+        
+        let submit_button = widget::button::text("Import")
+            .on_press(Message::ImportConfigSubmit);
+        
+        let cancel_button = widget::button::text("Cancel")
+            .on_press(Message::ImportDialogClosed(id));
+        
+        let button_row = widget::row()
+            .push(submit_button)
+            .push(cancel_button)
+            .spacing(10);
+        
+        let dialog_content = widget::column()
+            .push(widget::text("Import OpenVPN Config"))
+            .push(file_path_input)
+            .push(custom_name_input)
+            .push(button_row)
+            .spacing(10)
+            .padding(20);
+        
+        widget::container(dialog_content)
+            .width(400)
+            .height(200)
+            .into()
     }
 }

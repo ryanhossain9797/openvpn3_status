@@ -100,6 +100,43 @@ pub fn delete_openvpn_profile(profile_name: &str) -> Result<(), String> {
     Ok(())
 }
 
+/// Imports an OpenVPN configuration file
+pub fn import_openvpn_config(config_path: &str, custom_name: Option<&str>) -> Result<String, String> {
+    // Use custom name if provided and not empty/whitespace, otherwise fall back to filename
+    let profile_name = if let Some(name) = custom_name {
+        let trimmed = name.trim();
+        if trimmed.is_empty() {
+            // Fall back to filename if custom name is empty/whitespace
+            std::path::Path::new(config_path)
+                .file_stem()
+                .and_then(|s| s.to_str())
+                .unwrap_or("unknown")
+                .to_string()
+        } else {
+            trimmed.to_string()
+        }
+    } else {
+        // No custom name provided, use filename
+        std::path::Path::new(config_path)
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .unwrap_or("unknown")
+            .to_string()
+    };
+
+    let output = Command::new("openvpn3")
+        .args(&["config-import", "--config", config_path, "--name", &profile_name, "--persistent"])
+        .output()
+        .map_err(|e| format!("Failed to execute openvpn3 config-import command: {}", e))?;
+
+    if !output.status.success() {
+        let error_msg = String::from_utf8_lossy(&output.stderr);
+        return Err(format!("Failed to import config '{}': {}", config_path, error_msg));
+    }
+
+    Ok(profile_name)
+}
+
 /// Checks if OpenVPN 3 is available on the system
 pub fn is_openvpn3_available() -> bool {
     Command::new("openvpn3")
