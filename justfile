@@ -69,27 +69,42 @@ install:
     install -Dm0755 {{bin-src}} {{bin-dst}}
     install -Dm0644 {{desktop-src}} {{desktop-dst}}
     install -Dm0644 {{metainfo-src}} {{metainfo-dst}}
-    for size in `ls {{icons-src}}`; do \
-        install -Dm0644 "{{icons-src}}/$size/apps/com.example.CosmicAppletTemplate.svg" "{{icons-dst}}/$size/apps/{{APPID}}.svg"; \
-    done
+    # Install custom logo_dark.svg icon for applet picker
+    install -Dm0644 "res/icons/logo_dark.svg" "{{icons-dst}}/256x256/apps/logo_dark.svg"
+    install -Dm0644 "res/icons/logo_dark.svg" "{{icons-dst}}/128x128/apps/logo_dark.svg"
+    install -Dm0644 "res/icons/logo_dark.svg" "{{icons-dst}}/64x64/apps/logo_dark.svg"
+    install -Dm0644 "res/icons/logo_dark.svg" "{{icons-dst}}/48x48/apps/logo_dark.svg"
+    install -Dm0644 "res/icons/logo_dark.svg" "{{icons-dst}}/32x32/apps/logo_dark.svg"
+    install -Dm0644 "res/icons/logo_dark.svg" "{{icons-dst}}/24x24/apps/logo_dark.svg"
+    install -Dm0644 "res/icons/logo_dark.svg" "{{icons-dst}}/16x16/apps/logo_dark.svg"
 
 # Installs files
 flatpak:
     install -Dm0755 {{bin-src}} {{flatpak-bin-dst}}
     install -Dm0644 {{desktop-src}} {{desktop-dst}}
     install -Dm0644 {{metainfo-src}} {{metainfo-dst}}
-    for size in `ls {{icons-src}}`; do \
-        install -Dm0644 "{{icons-src}}/$size/apps/com.example.CosmicAppletTemplate.svg" "{{icons-dst}}/$size/apps/{{APPID}}.svg"; \
-    done
+    # Install custom logo_dark.svg icon for applet picker
+    install -Dm0644 "res/icons/logo_dark.svg" "{{icons-dst}}/256x256/apps/logo_dark.svg"
+    install -Dm0644 "res/icons/logo_dark.svg" "{{icons-dst}}/128x128/apps/logo_dark.svg"
+    install -Dm0644 "res/icons/logo_dark.svg" "{{icons-dst}}/64x64/apps/logo_dark.svg"
+    install -Dm0644 "res/icons/logo_dark.svg" "{{icons-dst}}/48x48/apps/logo_dark.svg"
+    install -Dm0644 "res/icons/logo_dark.svg" "{{icons-dst}}/32x32/apps/logo_dark.svg"
+    install -Dm0644 "res/icons/logo_dark.svg" "{{icons-dst}}/24x24/apps/logo_dark.svg"
+    install -Dm0644 "res/icons/logo_dark.svg" "{{icons-dst}}/16x16/apps/logo_dark.svg"
 
 # Uninstalls installed files
 uninstall:
     rm {{bin-dst}}
     rm {{desktop-dst}}
     rm {{metainfo-dst}}
-    for size in `ls {{icons-src}}`; do \
-        rm "{{icons-dst}}/$size/apps/{{APPID}}.svg"; \
-    done
+    # Remove custom logo_dark.svg icon
+    rm "{{icons-dst}}/256x256/apps/logo_dark.svg"
+    rm "{{icons-dst}}/128x128/apps/logo_dark.svg"
+    rm "{{icons-dst}}/64x64/apps/logo_dark.svg"
+    rm "{{icons-dst}}/48x48/apps/logo_dark.svg"
+    rm "{{icons-dst}}/32x32/apps/logo_dark.svg"
+    rm "{{icons-dst}}/24x24/apps/logo_dark.svg"
+    rm "{{icons-dst}}/16x16/apps/logo_dark.svg"
 
 # Vendor dependencies locally
 vendor:

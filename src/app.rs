@@ -33,9 +33,10 @@ pub struct OpenVpn3Status {
 pub enum Message {
     TogglePopup,
     PopupClosed(Id),
-    ToggleExampleRow(bool),
+    // ToggleExampleRow(bool), // Example row - commented out but kept for reference
     DeleteProfile(String), // Profile name to delete
     DisconnectSession(String), // Profile name to disconnect
+    RefreshProfiles, // Refresh OpenVPN profiles and session status
 }
 
 /// Implement the `Application` trait for your application.
@@ -111,11 +112,11 @@ impl Application for OpenVpn3Status {
     fn view_window(&self, _id: Id) -> Element<'_, Self::Message> {
         let mut content_list = widget::list_column()
             .padding(5)
-            .spacing(0)
-            .add(settings::item(
-                fl!("example-row"),
-                widget::toggler(self.example_row).on_toggle(Message::ToggleExampleRow),
-            ));
+            .spacing(0);
+            // .add(settings::item(
+            //     fl!("example-row"),
+            //     widget::toggler(self.example_row).on_toggle(Message::ToggleExampleRow),
+            // ));
 
         // Add OpenVPN 3 profiles if available
         if self.openvpn3_available {
@@ -125,10 +126,13 @@ impl Application for OpenVpn3Status {
                     widget::text("No profiles found"),
                 ));
             } else {
-                // Add header for profiles section
+                // Add header for profiles section with refresh button
+                let refresh_button = widget::button::icon(widget::icon::from_name("view-refresh-symbolic"))
+                    .on_press(Message::RefreshProfiles);
+                
                 content_list = content_list.add(settings::item(
                     "OpenVPN 3 Profiles",
-                    widget::text(""),
+                    refresh_button,
                 ));
                 
                 // Add each profile
@@ -136,13 +140,13 @@ impl Application for OpenVpn3Status {
                     let is_active = is_profile_session_active(&profile.name);
                     
                     if is_active {
-                        // Show disconnect button for active sessions
-                        let disconnect_button = widget::button::icon(widget::icon::from_name("media-playback-stop-symbolic"))
+                        // Show green connected button for active sessions
+                        let connected_button = widget::button::icon(widget::icon::from_name("network-wireless-signal-excellent-symbolic"))
                             .on_press(Message::DisconnectSession(profile.name.clone()));
                         
                         content_list = content_list.add(settings::item(
                             &profile.name,
-                            disconnect_button,
+                            connected_button,
                         ));
                     } else {
                         // Show delete button for inactive profiles
@@ -175,6 +179,11 @@ impl Application for OpenVpn3Status {
                 return if let Some(p) = self.popup.take() {
                     destroy_popup(p)
                 } else {
+                    // Refresh OpenVPN profiles and session status when opening popup
+                    if self.openvpn3_available {
+                        self.openvpn_profiles = get_openvpn_profiles().unwrap_or_default();
+                    }
+                    
                     let new_id = Id::unique();
                     self.popup.replace(new_id);
                     let mut popup_settings = self.core.applet.get_popup_settings(
@@ -197,7 +206,7 @@ impl Application for OpenVpn3Status {
                     self.popup = None;
                 }
             }
-            Message::ToggleExampleRow(toggled) => self.example_row = toggled,
+            // Message::ToggleExampleRow(toggled) => self.example_row = toggled,
             Message::DeleteProfile(profile_name) => {
                 // Actually delete the profile from OpenVPN 3 system
                 match delete_openvpn_profile(&profile_name) {
@@ -222,6 +231,13 @@ impl Application for OpenVpn3Status {
                         // TODO: Show error message to user
                         eprintln!("Failed to disconnect session for profile '{}': {}", profile_name, error);
                     }
+                }
+            }
+            Message::RefreshProfiles => {
+                // Refresh OpenVPN profiles and session status
+                if self.openvpn3_available {
+                    self.openvpn_profiles = get_openvpn_profiles().unwrap_or_default();
+                    eprintln!("Refreshed OpenVPN profiles: {} profiles found", self.openvpn_profiles.len());
                 }
             }
         }
