@@ -137,6 +137,43 @@ pub fn import_openvpn_config(config_path: &str, custom_name: Option<&str>) -> Re
     Ok(profile_name)
 }
 
+/// Starts an OpenVPN session with authentication
+pub fn start_openvpn_session(profile_name: &str, username: &str, password: &str, totp: Option<&str>) -> Result<String, String> {
+    let args = vec!["session-start", "--config", profile_name, "--background"];
+    
+    // Set up input for authentication
+    let auth_input = if let Some(totp_code) = totp {
+        format!("{}\n{}\n{}\n", username, password, totp_code)
+    } else {
+        format!("{}\n{}\n", username, password)
+    };
+    
+    let mut child = Command::new("openvpn3")
+        .args(&args)
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .map_err(|e| format!("Failed to start openvpn3 session-start command: {}", e))?;
+    
+    // Send authentication credentials
+    if let Some(mut stdin) = child.stdin.take() {
+        use std::io::Write;
+        stdin.write_all(auth_input.as_bytes())
+            .map_err(|e| format!("Failed to send authentication: {}", e))?;
+    }
+    
+    let result = child.wait_with_output()
+        .map_err(|e| format!("Failed to wait for openvpn3 session-start: {}", e))?;
+    
+    if !result.status.success() {
+        let error_msg = String::from_utf8_lossy(&result.stderr);
+        return Err(format!("Failed to start session for profile '{}': {}", profile_name, error_msg));
+    }
+    
+    Ok(format!("Session started for profile '{}'", profile_name))
+}
+
 /// Checks if OpenVPN 3 is available on the system
 pub fn is_openvpn3_available() -> bool {
     Command::new("openvpn3")

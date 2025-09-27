@@ -8,7 +8,7 @@ use cosmic::widget::{self, settings};
 use cosmic::{Application, Element};
 
 use crate::fl;
-use crate::core::openvpn::{get_openvpn_profiles, is_openvpn3_available, delete_openvpn_profile, is_profile_session_active, disconnect_openvpn_session, import_openvpn_config, OpenVPNProfile};
+use crate::core::openvpn::{get_openvpn_profiles, is_openvpn3_available, delete_openvpn_profile, is_profile_session_active, disconnect_openvpn_session, import_openvpn_config, start_openvpn_session, OpenVPNProfile};
 
 /// This is the struct that represents your application.
 /// It is used to define the data that will be used by your application.
@@ -30,6 +30,16 @@ pub struct OpenVpn3Status {
     import_file_path: String,
     /// Custom name for import dialog.
     import_custom_name: String,
+    /// Connect dialog popup id.
+    connect_dialog: Option<Id>,
+    /// Profile name for connect dialog.
+    connect_profile_name: String,
+    /// Username for connect dialog.
+    connect_username: String,
+    /// Password for connect dialog.
+    connect_password: String,
+    /// TOTP for connect dialog.
+    connect_totp: String,
 }
 
 /// This is the enum that contains all the possible variants that your application will need to transmit messages.
@@ -49,6 +59,13 @@ pub enum Message {
     ImportCustomNameChanged(String), // Custom name input changed
     ImportConfigSubmit, // Submit the import form
     ConfigImported(String, Option<String>), // Config file path and custom name that was imported
+    ConnectProfile(String), // Open connect dialog for profile
+    ConnectDialogClosed(Id), // Connect dialog was closed
+    ConnectUsernameChanged(String), // Username input changed
+    ConnectPasswordChanged(String), // Password input changed
+    ConnectTotpChanged(String), // TOTP input changed
+    ConnectSubmit, // Submit the connect form
+    SessionStarted(String), // Session started for profile
 }
 
 /// Implement the `Application` trait for your application.
@@ -160,22 +177,29 @@ impl Application for OpenVpn3Status {
                     let is_active = is_profile_session_active(&profile.name);
                     
                     if is_active {
-                        // Show green connected button for active sessions
-                        let connected_button = widget::button::icon(widget::icon::from_name("network-wireless-signal-excellent-symbolic"))
+                        // Show disconnect button for active sessions (use different icon)
+                        let disconnect_button = widget::button::icon(widget::icon::from_name("media-playback-stop-symbolic"))
                             .on_press(Message::DisconnectSession(profile.name.clone()));
                         
                         content_list = content_list.add(settings::item(
                             &profile.name,
-                            connected_button,
+                            disconnect_button,
                         ));
                     } else {
-                        // Show delete button for inactive profiles
+                        // Show connect and delete buttons for inactive profiles
+                        let connect_button = widget::button::icon(widget::icon::from_name("media-playback-start-symbolic"))
+                            .on_press(Message::ConnectProfile(profile.name.clone()));
                         let delete_button = widget::button::icon(widget::icon::from_name("edit-delete-symbolic"))
                             .on_press(Message::DeleteProfile(profile.name.clone()));
                         
+                        let button_row = widget::row()
+                            .push(connect_button)
+                            .push(delete_button)
+                            .spacing(5);
+                        
                         content_list = content_list.add(settings::item(
                             &profile.name,
-                            delete_button,
+                            button_row,
                         ));
                     }
                 }
@@ -194,6 +218,15 @@ impl Application for OpenVpn3Status {
             final_content_list = final_content_list.add(settings::item(
                 "Import Dialog",
                 import_dialog,
+            ));
+        }
+        
+        // Add connect dialog content to the main list if open
+        if let Some(connect_dialog_id) = self.connect_dialog {
+            let connect_dialog = self.view_connect_dialog(connect_dialog_id);
+            final_content_list = final_content_list.add(settings::item(
+                "Connect Dialog",
+                connect_dialog,
             ));
         }
         
@@ -328,6 +361,61 @@ impl Application for OpenVpn3Status {
                     }
                 }
             }
+            Message::ConnectProfile(profile_name) => {
+                // Open connect dialog
+                let connect_dialog_id = Id::unique();
+                self.connect_dialog = Some(connect_dialog_id);
+                self.connect_profile_name = profile_name;
+                self.connect_username.clear();
+                self.connect_password.clear();
+                self.connect_totp.clear();
+                eprintln!("Opening connect dialog for profile: {}", self.connect_profile_name);
+            }
+            Message::ConnectDialogClosed(id) => {
+                if self.connect_dialog == Some(id) {
+                    self.connect_dialog = None;
+                }
+            }
+            Message::ConnectUsernameChanged(username) => {
+                self.connect_username = username;
+            }
+            Message::ConnectPasswordChanged(password) => {
+                self.connect_password = password;
+            }
+            Message::ConnectTotpChanged(totp) => {
+                self.connect_totp = totp;
+            }
+            Message::ConnectSubmit => {
+                if !self.connect_username.trim().is_empty() && !self.connect_password.trim().is_empty() {
+                    let totp = if self.connect_totp.trim().is_empty() {
+                        None
+                    } else {
+                        Some(self.connect_totp.trim())
+                    };
+                    // Close the dialog
+                    self.connect_dialog = None;
+                    // Start the session
+                    match start_openvpn_session(&self.connect_profile_name, &self.connect_username, &self.connect_password, totp) {
+                        Ok(message) => {
+                            eprintln!("{}", message);
+                            // Refresh the profiles list to show the new session status
+                            if self.openvpn3_available {
+                                self.openvpn_profiles = get_openvpn_profiles().unwrap_or_default();
+                            }
+                        }
+                        Err(error) => {
+                            eprintln!("Failed to start session for profile '{}': {}", self.connect_profile_name, error);
+                        }
+                    }
+                }
+            }
+            Message::SessionStarted(profile_name) => {
+                eprintln!("Session started for profile: {}", profile_name);
+                // Refresh the profiles list to show the new session status
+                if self.openvpn3_available {
+                    self.openvpn_profiles = get_openvpn_profiles().unwrap_or_default();
+                }
+            }
         }
         Task::none()
     }
@@ -369,6 +457,44 @@ impl OpenVpn3Status {
         widget::container(dialog_content)
             .width(400)
             .height(200)
+            .into()
+    }
+    
+    /// View for the connect dialog
+    fn view_connect_dialog(&self, id: Id) -> Element<Message> {
+        let username_input = widget::text_input("Username", &self.connect_username)
+            .on_input(Message::ConnectUsernameChanged);
+        
+        let password_input = widget::text_input("Password", &self.connect_password)
+            .password()
+            .on_input(Message::ConnectPasswordChanged);
+        
+        let totp_input = widget::text_input("TOTP (optional)", &self.connect_totp)
+            .on_input(Message::ConnectTotpChanged);
+        
+        let connect_button = widget::button::text("Connect")
+            .on_press(Message::ConnectSubmit);
+        
+        let cancel_button = widget::button::text("Cancel")
+            .on_press(Message::ConnectDialogClosed(id));
+        
+        let button_row = widget::row()
+            .push(connect_button)
+            .push(cancel_button)
+            .spacing(10);
+        
+        let dialog_content = widget::column()
+            .push(widget::text("Connect to VPN"))
+            .push(username_input)
+            .push(password_input)
+            .push(totp_input)
+            .push(button_row)
+            .spacing(10)
+            .padding(20);
+        
+        widget::container(dialog_content)
+            .width(400)
+            .height(250)
             .into()
     }
 }
