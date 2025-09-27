@@ -53,7 +53,7 @@ impl Application for OpenVpn3Status {
 
     type Message = Message;
 
-    const APP_ID: &'static str = "com.example.CosmicAppletTemplate";
+    const APP_ID: &'static str = "com.system76.OpenVPN3Status";
 
     fn core(&self) -> &Core {
         &self.core

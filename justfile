@@ -1,5 +1,5 @@
-name := 'cosmic-applet-template'
-export APPID := 'com.example.CosmicAppletTemplate'
+name := 'cosmic-openvpn3-status'
+export APPID := 'com.system76.OpenVPN3Status'
 
 rootdir := ''
 prefix := '/usr'
@@ -70,7 +70,7 @@ install:
     install -Dm0644 {{desktop-src}} {{desktop-dst}}
     install -Dm0644 {{metainfo-src}} {{metainfo-dst}}
     for size in `ls {{icons-src}}`; do \
-        install -Dm0644 "{{icons-src}}/$size/apps/{{APPID}}.svg" "{{icons-dst}}/$size/apps/{{APPID}}.svg"; \
+        install -Dm0644 "{{icons-src}}/$size/apps/com.example.CosmicAppletTemplate.svg" "{{icons-dst}}/$size/apps/{{APPID}}.svg"; \
     done
 
 # Installs files
@@ -79,7 +79,7 @@ flatpak:
     install -Dm0644 {{desktop-src}} {{desktop-dst}}
     install -Dm0644 {{metainfo-src}} {{metainfo-dst}}
     for size in `ls {{icons-src}}`; do \
-        install -Dm0644 "{{icons-src}}/$size/apps/{{APPID}}.svg" "{{icons-dst}}/$size/apps/{{APPID}}.svg"; \
+        install -Dm0644 "{{icons-src}}/$size/apps/com.example.CosmicAppletTemplate.svg" "{{icons-dst}}/$size/apps/{{APPID}}.svg"; \
     done
 
 # Uninstalls installed files
