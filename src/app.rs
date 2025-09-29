@@ -8,7 +8,7 @@ use cosmic::widget::{self, settings};
 use cosmic::{Application, Element};
 
 use crate::fl;
-use crate::core::openvpn::{get_openvpn_profiles, is_openvpn3_available, delete_openvpn_profile, is_profile_session_active, disconnect_openvpn_session, import_openvpn_config, start_openvpn_session, OpenVPNProfile};
+use crate::core::openvpn::{get_openvpn_profiles, is_openvpn3_available, delete_openvpn_profile, disconnect_openvpn_session, import_openvpn_config, start_openvpn_session, is_profile_connecting, OpenVPNProfile};
 
 /// This is the struct that represents your application.
 /// It is used to define the data that will be used by your application.
@@ -66,6 +66,7 @@ pub enum Message {
     ConnectTotpChanged(String), // TOTP input changed
     ConnectSubmit, // Submit the connect form
     SessionStarted(String), // Session started for profile
+    AutoRefresh, // Automatic refresh triggered by connecting states
 }
 
 /// Implement the `Application` trait for your application.
@@ -174,9 +175,7 @@ impl Application for OpenVpn3Status {
             } else {
                 // Add each profile
                 for profile in &self.openvpn_profiles {
-                    let is_active = is_profile_session_active(&profile.name);
-                    
-                    if is_active {
+                    if profile.is_active {
                         // Show disconnect button for active sessions (use different icon)
                         let disconnect_button = widget::button::icon(widget::icon::from_name("media-playback-stop-symbolic"))
                             .on_press(Message::DisconnectSession(profile.name.clone()));
@@ -289,6 +288,10 @@ impl Application for OpenVpn3Status {
                     Ok(_) => {
                         // Session disconnected successfully
                         eprintln!("Successfully disconnected session for profile '{}'", profile_name);
+                        // Refresh the profiles list to show the updated session status
+                        if self.openvpn3_available {
+                            self.openvpn_profiles = get_openvpn_profiles().unwrap_or_default();
+                        }
                     }
                     Err(error) => {
                         // TODO: Show error message to user
@@ -301,6 +304,39 @@ impl Application for OpenVpn3Status {
                 if self.openvpn3_available {
                     self.openvpn_profiles = get_openvpn_profiles().unwrap_or_default();
                     eprintln!("Refreshed OpenVPN profiles: {} profiles found", self.openvpn_profiles.len());
+                    
+                    // Check if any profiles are in connecting state and schedule auto-refresh
+                    let has_connecting = self.openvpn_profiles.iter().any(|profile| is_profile_connecting(&profile.name));
+                    if has_connecting {
+                        eprintln!("Found connecting profiles, scheduling auto-refresh in 3 seconds");
+                        return Task::perform(
+                            async {
+                                tokio::time::sleep(tokio::time::Duration::from_secs(3)).await;
+                            },
+                            |_| cosmic::Action::App(Message::AutoRefresh),
+                        );
+                    }
+                }
+            }
+            Message::AutoRefresh => {
+                // Automatic refresh triggered by connecting states
+                if self.openvpn3_available {
+                    self.openvpn_profiles = get_openvpn_profiles().unwrap_or_default();
+                    eprintln!("Auto-refreshed OpenVPN profiles: {} profiles found", self.openvpn_profiles.len());
+                    
+                    // Check again if any profiles are still connecting and schedule another refresh
+                    let has_connecting = self.openvpn_profiles.iter().any(|profile| is_profile_connecting(&profile.name));
+                    if has_connecting {
+                        eprintln!("Still found connecting profiles, scheduling another auto-refresh in 3 seconds");
+                        return Task::perform(
+                            async {
+                                tokio::time::sleep(tokio::time::Duration::from_secs(3)).await;
+                            },
+                            |_| cosmic::Action::App(Message::AutoRefresh),
+                        );
+                    } else {
+                        eprintln!("No more connecting profiles, stopping auto-refresh");
+                    }
                 }
             }
             Message::ImportConfig => {
@@ -335,14 +371,14 @@ impl Application for OpenVpn3Status {
                     match import_openvpn_config(&self.import_file_path, custom_name) {
                         Ok(profile_name) => {
                             eprintln!("Successfully imported config '{}' as profile '{}'", self.import_file_path, profile_name);
-                            // Refresh the profiles list to show the new profile
-                            if self.openvpn3_available {
-                                self.openvpn_profiles = get_openvpn_profiles().unwrap_or_default();
-                            }
                         }
                         Err(error) => {
                             eprintln!("Failed to import config '{}': {}", self.import_file_path, error);
                         }
+                    }
+                    // Always refresh the profiles list after import attempt
+                    if self.openvpn3_available {
+                        self.openvpn_profiles = get_openvpn_profiles().unwrap_or_default();
                     }
                 }
             }
@@ -398,14 +434,14 @@ impl Application for OpenVpn3Status {
                     match start_openvpn_session(&self.connect_profile_name, &self.connect_username, &self.connect_password, totp) {
                         Ok(message) => {
                             eprintln!("{}", message);
-                            // Refresh the profiles list to show the new session status
-                            if self.openvpn3_available {
-                                self.openvpn_profiles = get_openvpn_profiles().unwrap_or_default();
-                            }
                         }
                         Err(error) => {
                             eprintln!("Failed to start session for profile '{}': {}", self.connect_profile_name, error);
                         }
+                    }
+                    // Always refresh the profiles list after connection attempt
+                    if self.openvpn3_available {
+                        self.openvpn_profiles = get_openvpn_profiles().unwrap_or_default();
                     }
                 }
             }
