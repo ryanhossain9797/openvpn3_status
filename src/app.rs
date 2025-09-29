@@ -8,7 +8,7 @@ use cosmic::widget;
 use cosmic::{Application, Element};
 
 use crate::fl;
-use crate::core::openvpn::{get_openvpn_profiles, is_openvpn3_available, delete_openvpn_profile, disconnect_openvpn_session, import_openvpn_config, start_openvpn_session, is_profile_connecting, OpenVPNProfile};
+use crate::core::openvpn::{get_openvpn_profiles, is_openvpn3_available, delete_openvpn_profile, disconnect_openvpn_session, import_openvpn_config, start_openvpn_session, is_profile_connecting, profile_requires_totp, OpenVPNProfile};
 
 /// This is the struct that represents your application.
 /// It is used to define the data that will be used by your application.
@@ -40,6 +40,8 @@ pub struct OpenVpn3Status {
     connect_password: String,
     /// TOTP for connect dialog.
     connect_totp: String,
+    /// Whether the current profile requires TOTP.
+    profile_requires_totp: bool,
 }
 
 /// This is the enum that contains all the possible variants that your application will need to transmit messages.
@@ -401,6 +403,10 @@ impl Application for OpenVpn3Status {
                     return Task::none();
                 }
                 
+                // Check if this profile requires TOTP
+                let requires_totp = profile_requires_totp(&profile_name);
+                eprintln!("Profile '{}' requires TOTP: {}", profile_name, requires_totp);
+                
                 // Open connect dialog
                 let connect_dialog_id = Id::unique();
                 self.connect_dialog = Some(connect_dialog_id);
@@ -408,6 +414,7 @@ impl Application for OpenVpn3Status {
                 self.connect_username.clear();
                 self.connect_password.clear();
                 self.connect_totp.clear();
+                self.profile_requires_totp = requires_totp;
                 eprintln!("Opening connect dialog for profile: {}", self.connect_profile_name);
             }
             Message::ConnectDialogClosed(id) => {
@@ -425,7 +432,12 @@ impl Application for OpenVpn3Status {
                 self.connect_totp = totp;
             }
             Message::ConnectSubmit => {
-                if !self.connect_username.trim().is_empty() && !self.connect_password.trim().is_empty() {
+                // Validate required fields
+                let username_valid = !self.connect_username.trim().is_empty();
+                let password_valid = !self.connect_password.trim().is_empty();
+                let totp_valid = !self.profile_requires_totp || !self.connect_totp.trim().is_empty();
+                
+                if username_valid && password_valid && totp_valid {
                     let totp = if self.connect_totp.trim().is_empty() {
                         None
                     } else {
@@ -446,6 +458,8 @@ impl Application for OpenVpn3Status {
                     if self.openvpn3_available {
                         self.openvpn_profiles = get_openvpn_profiles().unwrap_or_default();
                     }
+                } else {
+                    eprintln!("Please fill in all required fields");
                 }
             }
             Message::SessionStarted(profile_name) => {
@@ -508,8 +522,17 @@ impl OpenVpn3Status {
             .password()
             .on_input(Message::ConnectPasswordChanged);
         
-        let totp_input = widget::text_input("TOTP (optional)", &self.connect_totp)
-            .on_input(Message::ConnectTotpChanged);
+        let mut dialog_content = widget::column()
+            .push(widget::text("Connect to VPN"))
+            .push(username_input)
+            .push(password_input);
+        
+        // Only show TOTP field if the profile requires it
+        if self.profile_requires_totp {
+            let totp_input = widget::text_input("TOTP Code (required)", &self.connect_totp)
+                .on_input(Message::ConnectTotpChanged);
+            dialog_content = dialog_content.push(totp_input);
+        }
         
         let connect_button = widget::button::text("Connect")
             .on_press(Message::ConnectSubmit);
@@ -522,18 +545,17 @@ impl OpenVpn3Status {
             .push(cancel_button)
             .spacing(10);
         
-        let dialog_content = widget::column()
-            .push(widget::text("Connect to VPN"))
-            .push(username_input)
-            .push(password_input)
-            .push(totp_input)
+        dialog_content = dialog_content
             .push(button_row)
             .spacing(10)
             .padding(20);
         
+        // Adjust height based on whether TOTP field is shown
+        let height = if self.profile_requires_totp { 280 } else { 250 };
+        
         widget::container(dialog_content)
             .width(400)
-            .height(250)
+            .height(height)
             .into()
     }
 }
