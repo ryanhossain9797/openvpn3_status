@@ -4,7 +4,7 @@ use cosmic::app::{Core, Task};
 use cosmic::iced::window::Id;
 use cosmic::iced::Limits;
 use cosmic::iced_winit::commands::popup::{destroy_popup, get_popup};
-use cosmic::widget::{self, settings};
+use cosmic::widget;
 use cosmic::{Application, Element};
 
 use crate::fl;
@@ -140,96 +140,75 @@ impl Application for OpenVpn3Status {
     }
 
     fn view_window(&self, _id: Id) -> Element<'_, Self::Message> {
-        let mut content_list = widget::list_column()
-            .padding(5)
-            .spacing(0);
-            // .add(settings::item(
-            //     fl!("example-row"),
-            //     widget::toggler(self.example_row).on_toggle(Message::ToggleExampleRow),
-            // ));
+        let mut content = widget::column()
+            .spacing(10)
+            .padding(20);
 
         // Add OpenVPN 3 profiles if available
         if self.openvpn3_available {
-            // Always add header for profiles section with refresh and import buttons
-            let refresh_button = widget::button::icon(widget::icon::from_name("view-refresh-symbolic"))
+            // Add header with title
+            content = content.push(widget::text("OpenVPN 3 Profiles").size(18));
+            
+            // Add refresh and import buttons
+            let refresh_button = widget::button::text("Refresh")
                 .on_press(Message::RefreshProfiles);
-            let import_button = widget::button::icon(widget::icon::from_name("document-open-symbolic"))
+            let import_button = widget::button::text("Import Config")
                 .on_press(Message::ImportConfig);
             
-            // Create a row with both buttons
             let button_row = widget::row()
                 .push(refresh_button)
                 .push(import_button)
-                .spacing(5);
+                .spacing(10);
             
-            content_list = content_list.add(settings::item(
-                "OpenVPN 3 Profiles",
-                button_row,
-            ));
+            content = content.push(button_row);
+            content = content.push(widget::horizontal_space());
             
             if self.openvpn_profiles.is_empty() {
-                content_list = content_list.add(settings::item(
-                    "Profiles",
-                    widget::text("No profiles found"),
-                ));
+                content = content.push(widget::text("No profiles found"));
             } else {
                 // Add each profile
                 for profile in &self.openvpn_profiles {
-                    if profile.is_active {
-                        // Show disconnect button for active sessions (use different icon)
-                        let disconnect_button = widget::button::icon(widget::icon::from_name("media-playback-stop-symbolic"))
+                    let profile_row = if profile.is_active {
+                        // Show disconnect button for active sessions
+                        let disconnect_button = widget::button::text("Disconnect")
                             .on_press(Message::DisconnectSession(profile.name.clone()));
                         
-                        content_list = content_list.add(settings::item(
-                            &profile.name,
-                            disconnect_button,
-                        ));
+                        widget::row()
+                            .push(widget::text(&profile.name).width(cosmic::iced::Length::Fill))
+                            .push(disconnect_button)
+                            .spacing(10)
                     } else {
                         // Show connect and delete buttons for inactive profiles
-                        let connect_button = widget::button::icon(widget::icon::from_name("media-playback-start-symbolic"))
+                        let connect_button = widget::button::text("Connect")
                             .on_press(Message::ConnectProfile(profile.name.clone()));
-                        let delete_button = widget::button::icon(widget::icon::from_name("edit-delete-symbolic"))
+                        let delete_button = widget::button::text("Delete")
                             .on_press(Message::DeleteProfile(profile.name.clone()));
                         
-                        let button_row = widget::row()
+                        widget::row()
+                            .push(widget::text(&profile.name).width(cosmic::iced::Length::Fill))
                             .push(connect_button)
                             .push(delete_button)
-                            .spacing(5);
-                        
-                        content_list = content_list.add(settings::item(
-                            &profile.name,
-                            button_row,
-                        ));
-                    }
+                            .spacing(10)
+                    };
+                    
+                    content = content.push(profile_row);
                 }
             }
         } else {
-            content_list = content_list.add(settings::item(
-                "OpenVPN 3",
-                widget::text("OpenVPN 3 not available"),
-            ));
+            content = content.push(widget::text("OpenVPN 3 not available"));
         }
 
-        // Add import dialog content to the main list if open
-        let mut final_content_list = content_list;
+        // Show modal dialogs - if any dialog is open, only show that dialog
         if let Some(import_dialog_id) = self.import_dialog {
             let import_dialog = self.view_import_dialog(import_dialog_id);
-            final_content_list = final_content_list.add(settings::item(
-                "Import Dialog",
-                import_dialog,
-            ));
-        }
-        
-        // Add connect dialog content to the main list if open
-        if let Some(connect_dialog_id) = self.connect_dialog {
+            self.core.applet.popup_container(import_dialog).into()
+        } else if let Some(connect_dialog_id) = self.connect_dialog {
             let connect_dialog = self.view_connect_dialog(connect_dialog_id);
-            final_content_list = final_content_list.add(settings::item(
-                "Connect Dialog",
-                connect_dialog,
-            ));
+            self.core.applet.popup_container(connect_dialog).into()
+        } else {
+            // No dialogs open, show main content
+            self.core.applet.popup_container(content).into()
         }
-        
-        self.core.applet.popup_container(final_content_list).into()
     }
 
     /// Application messages are handled here. The application state can be modified based on
@@ -270,6 +249,12 @@ impl Application for OpenVpn3Status {
             }
             // Message::ToggleExampleRow(toggled) => self.example_row = toggled,
             Message::DeleteProfile(profile_name) => {
+                // Don't allow profile deletion when dialogs are open
+                if self.import_dialog.is_some() || self.connect_dialog.is_some() {
+                    eprintln!("Cannot delete profile while dialog is open");
+                    return Task::none();
+                }
+                
                 // Actually delete the profile from OpenVPN 3 system
                 match delete_openvpn_profile(&profile_name) {
                     Ok(_) => {
@@ -283,6 +268,12 @@ impl Application for OpenVpn3Status {
                 }
             }
             Message::DisconnectSession(profile_name) => {
+                // Don't allow session disconnection when dialogs are open
+                if self.import_dialog.is_some() || self.connect_dialog.is_some() {
+                    eprintln!("Cannot disconnect session while dialog is open");
+                    return Task::none();
+                }
+                
                 // Disconnect the active session
                 match disconnect_openvpn_session(&profile_name) {
                     Ok(_) => {
@@ -340,6 +331,12 @@ impl Application for OpenVpn3Status {
                 }
             }
             Message::ImportConfig => {
+                // Don't open import dialog if another dialog is already open
+                if self.connect_dialog.is_some() {
+                    eprintln!("Cannot open import dialog while connect dialog is open");
+                    return Task::none();
+                }
+                
                 // Open import dialog
                 let import_dialog_id = Id::unique();
                 self.import_dialog = Some(import_dialog_id);
@@ -398,6 +395,12 @@ impl Application for OpenVpn3Status {
                 }
             }
             Message::ConnectProfile(profile_name) => {
+                // Don't open connect dialog if another dialog is already open
+                if self.import_dialog.is_some() {
+                    eprintln!("Cannot open connect dialog while import dialog is open");
+                    return Task::none();
+                }
+                
                 // Open connect dialog
                 let connect_dialog_id = Id::unique();
                 self.connect_dialog = Some(connect_dialog_id);
