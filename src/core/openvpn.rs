@@ -7,6 +7,7 @@ use std::process::Command;
 pub struct OpenVPNProfile {
     pub name: String,
     pub path: String,
+    pub is_active: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -18,9 +19,10 @@ pub struct OpenVPNProfileData {
     pub use_count: u32,
 }
 
+
 type OpenVPNConfigsMap = std::collections::HashMap<String, OpenVPNProfileData>;
 
-/// Fetches the list of OpenVPN 3 profiles from the system
+/// Fetches the list of OpenVPN 3 profiles from the system with their connection status
 pub fn get_openvpn_profiles() -> Result<Vec<OpenVPNProfile>, String> {
     let output = Command::new("openvpn3")
         .args(&["configs-list", "--json"])
@@ -38,12 +40,16 @@ pub fn get_openvpn_profiles() -> Result<Vec<OpenVPNProfile>, String> {
     let configs_map: OpenVPNConfigsMap = serde_json::from_str(&json_output)
         .map_err(|e| format!("Failed to parse JSON: {}", e))?;
 
-    // Convert the map to our profile list
+    // Convert the map to our profile list and check connection status for each
     let profiles: Vec<OpenVPNProfile> = configs_map
         .into_iter()
-        .map(|(path, data)| OpenVPNProfile {
-            name: data.name,
-            path,
+        .map(|(path, data)| {
+            let is_active = is_profile_session_active(&data.name);
+            OpenVPNProfile {
+                name: data.name,
+                path,
+                is_active,
+            }
         })
         .collect();
 
@@ -60,14 +66,104 @@ pub fn is_profile_session_active(profile_name: &str) -> bool {
         Ok(output) => {
             if output.status.success() {
                 let sessions_output = String::from_utf8_lossy(&output.stdout);
-                // Check if the profile name appears in the sessions list
-                sessions_output.contains(profile_name)
+                // Parse text output to check session status
+                parse_session_status(&sessions_output, profile_name)
             } else {
                 false
             }
         }
         Err(_) => false,
     }
+}
+
+/// Checks if a profile has any sessions in connecting state
+pub fn is_profile_connecting(profile_name: &str) -> bool {
+    let output = Command::new("openvpn3")
+        .args(&["sessions-list"])
+        .output();
+    
+    match output {
+        Ok(output) => {
+            if output.status.success() {
+                let sessions_output = String::from_utf8_lossy(&output.stdout);
+                // Parse text output to check for connecting states
+                parse_connecting_status(&sessions_output, profile_name)
+            } else {
+                false
+            }
+        }
+        Err(_) => false,
+    }
+}
+
+/// Parses the session status from openvpn3 sessions-list output to determine if connection is successful
+fn parse_session_status(sessions_output: &str, profile_name: &str) -> bool {
+    // Split the output into individual session blocks
+    let session_blocks: Vec<&str> = sessions_output.split("-----------------------------------------------------------------------------")
+        .filter(|block| !block.trim().is_empty())
+        .collect();
+    
+    // Check all sessions for this profile - return true if ANY session is successfully connected
+    for block in session_blocks {
+        if block.contains(&format!("Config name: {}", profile_name)) {
+            // Look for the Status line in this session block
+            for line in block.lines() {
+                if line.trim().starts_with("Status:") {
+                    let status = line.trim().strip_prefix("Status:").unwrap_or("").trim();
+                    // Check if the status indicates a successful connection
+                    // Look for positive indicators and exclude failure indicators
+                    let is_successful = status.contains("Client connected") ||
+                                       (status.contains("Connected") && !status.contains("failed")) ||
+                                       status.contains("Ready") ||
+                                       (status.contains("Connection") && 
+                                        status.contains("Client connected"));
+                    
+                    // If we find ANY successful session for this profile, return true
+                    if is_successful {
+                        return true;
+                    }
+                }
+            }
+        }
+    }
+    
+    false
+}
+
+/// Parses the session status to detect connecting states
+fn parse_connecting_status(sessions_output: &str, profile_name: &str) -> bool {
+    // Split the output into individual session blocks
+    let session_blocks: Vec<&str> = sessions_output.split("-----------------------------------------------------------------------------")
+        .filter(|block| !block.trim().is_empty())
+        .collect();
+    
+    // Check all sessions for this profile - return true if ANY session is connecting
+    for block in session_blocks {
+        if block.contains(&format!("Config name: {}", profile_name)) {
+            // Look for the Status line in this session block
+            for line in block.lines() {
+                if line.trim().starts_with("Status:") {
+                    let status = line.trim().strip_prefix("Status:").unwrap_or("").trim();
+                    // Check if the status indicates a connecting state
+                    let is_connecting = status.contains("Connecting") ||
+                                      status.contains("Resolving") ||
+                                      status.contains("Authenticating") ||
+                                      status.contains("Negotiating") ||
+                                      (status.contains("Connection") && 
+                                       !status.contains("Client connected") && 
+                                       !status.contains("failed") &&
+                                       !status.contains("Authentication failed"));
+                    
+                    // If we find ANY connecting session for this profile, return true
+                    if is_connecting {
+                        return true;
+                    }
+                }
+            }
+        }
+    }
+    
+    false
 }
 
 /// Disconnects an active OpenVPN 3 session by profile name
