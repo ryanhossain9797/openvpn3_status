@@ -34,10 +34,18 @@ impl OpenVpnClient {
         let profiles = profiles_map
             .into_iter()
             .map(|(path, data)| {
+                // Find the best status among all sessions for this profile
+                // Priority: Connected > Connecting > Failed > Disconnected
                 let status = sessions
                     .iter()
-                    .find(|s| s.profile_name == data.name)
+                    .filter(|s| s.profile_name == data.name)
                     .map(|s| s.status)
+                    .max_by_key(|s| match s {
+                        ConnectionStatus::Connected => 3,
+                        ConnectionStatus::Connecting => 2,
+                        ConnectionStatus::Failed => 1,
+                        ConnectionStatus::Disconnected => 0,
+                    })
                     .unwrap_or(ConnectionStatus::Disconnected);
 
                 Profile {
@@ -277,44 +285,58 @@ mod parser {
 
     /// Parse sessions from sessions-list output
     pub fn parse_sessions(output: &str) -> Vec<Session> {
-        let blocks = split_into_blocks(output);
-        blocks.into_iter().filter_map(parse_session_block).collect()
+        parse_all_sessions(output)
     }
 
-    /// Split output into session blocks
-    fn split_into_blocks(output: &str) -> Vec<&str> {
-        output
-            .split("-----------------------------------------------------------------------------")
-            .filter(|block| !block.trim().is_empty())
-            .collect()
-    }
+    /// Parse all sessions from output - sessions are separated by blank lines
+    fn parse_all_sessions(output: &str) -> Vec<Session> {
+        let mut sessions = Vec::new();
+        let mut current_path = None;
+        let mut current_profile = None;
+        let mut current_status = None;
 
-    /// Parse a single session block
-    fn parse_session_block(block: &str) -> Option<Session> {
-        let mut path = None;
-        let mut profile_name = None;
-        let mut status = None;
-
-        for line in block.lines() {
+        for line in output.lines() {
             let trimmed = line.trim();
 
+            // Skip delimiter lines
+            if trimmed.starts_with("---") {
+                continue;
+            }
+
+            // Empty line indicates end of a session block
+            if trimmed.is_empty() {
+                if let (Some(path), Some(profile_name), Some(status)) =
+                    (current_path.take(), current_profile.take(), current_status.take()) {
+                    sessions.push(Session {
+                        path,
+                        profile_name,
+                        status,
+                    });
+                }
+                continue;
+            }
+
+            // Parse fields
             if let Some(value) = trimmed.strip_prefix("Path:") {
-                path = Some(value.trim().to_string());
+                current_path = Some(value.trim().to_string());
             } else if let Some(value) = trimmed.strip_prefix("Config name:") {
-                profile_name = Some(value.trim().to_string());
+                current_profile = Some(value.trim().to_string());
             } else if let Some(value) = trimmed.strip_prefix("Status:") {
-                status = Some(parse_status(value.trim()));
+                current_status = Some(parse_status(value.trim()));
             }
         }
 
-        match (path, profile_name, status) {
-            (Some(path), Some(profile_name), Some(status)) => Some(Session {
+        // Don't forget the last session if the file doesn't end with a blank line
+        if let (Some(path), Some(profile_name), Some(status)) =
+            (current_path, current_profile, current_status) {
+            sessions.push(Session {
                 path,
                 profile_name,
                 status,
-            }),
-            _ => None,
+            });
         }
+
+        sessions
     }
 
     /// Parse status string into ConnectionStatus
