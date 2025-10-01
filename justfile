@@ -69,44 +69,20 @@ install:
     install -Dm0755 {{bin-src}} {{bin-dst}}
     install -Dm0644 {{desktop-src}} {{desktop-dst}}
     install -Dm0644 {{metainfo-src}} {{metainfo-dst}}
-    # Install custom logo_dark.svg icon for applet picker
-    install -Dm0644 "res/icons/logo_dark.svg" "{{icons-dst}}/256x256/apps/logo_dark.svg"
-    install -Dm0644 "res/icons/logo_dark.svg" "{{icons-dst}}/128x128/apps/logo_dark.svg"
-    install -Dm0644 "res/icons/logo_dark.svg" "{{icons-dst}}/64x64/apps/logo_dark.svg"
-    install -Dm0644 "res/icons/logo_dark.svg" "{{icons-dst}}/48x48/apps/logo_dark.svg"
-    install -Dm0644 "res/icons/logo_dark.svg" "{{icons-dst}}/32x32/apps/logo_dark.svg"
-    install -Dm0644 "res/icons/logo_dark.svg" "{{icons-dst}}/24x24/apps/logo_dark.svg"
-    install -Dm0644 "res/icons/logo_dark.svg" "{{icons-dst}}/16x16/apps/logo_dark.svg"
-    # Install custom logo_dark_outline.svg icon
-    install -Dm0644 "res/icons/logo_dark_outline.svg" "{{icons-dst}}/256x256/apps/logo_dark_outline.svg"
-    install -Dm0644 "res/icons/logo_dark_outline.svg" "{{icons-dst}}/128x128/apps/logo_dark_outline.svg"
-    install -Dm0644 "res/icons/logo_dark_outline.svg" "{{icons-dst}}/64x64/apps/logo_dark_outline.svg"
-    install -Dm0644 "res/icons/logo_dark_outline.svg" "{{icons-dst}}/48x48/apps/logo_dark_outline.svg"
-    install -Dm0644 "res/icons/logo_dark_outline.svg" "{{icons-dst}}/32x32/apps/logo_dark_outline.svg"
-    install -Dm0644 "res/icons/logo_dark_outline.svg" "{{icons-dst}}/24x24/apps/logo_dark_outline.svg"
-    install -Dm0644 "res/icons/logo_dark_outline.svg" "{{icons-dst}}/16x16/apps/logo_dark_outline.svg"
+    # Install custom openvpn3_status_cosmic_logo_filled.svg icon for applet
+    install -Dm0644 "res/icons/openvpn3_status_cosmic_logo_filled.svg" "{{icons-dst}}/scalable/status/openvpn3_status_cosmic_logo_filled.svg"
+    # Install custom openvpn3_status_cosmic_logo_outline.svg icon
+    install -Dm0644 "res/icons/openvpn3_status_cosmic_logo_outline.svg" "{{icons-dst}}/scalable/status/openvpn3_status_cosmic_logo_outline.svg"
 
 # Installs files
 flatpak:
     install -Dm0755 {{bin-src}} {{flatpak-bin-dst}}
     install -Dm0644 {{desktop-src}} {{desktop-dst}}
     install -Dm0644 {{metainfo-src}} {{metainfo-dst}}
-    # Install custom logo_dark.svg icon for applet picker
-    install -Dm0644 "res/icons/logo_dark.svg" "{{icons-dst}}/256x256/apps/logo_dark.svg"
-    install -Dm0644 "res/icons/logo_dark.svg" "{{icons-dst}}/128x128/apps/logo_dark.svg"
-    install -Dm0644 "res/icons/logo_dark.svg" "{{icons-dst}}/64x64/apps/logo_dark.svg"
-    install -Dm0644 "res/icons/logo_dark.svg" "{{icons-dst}}/48x48/apps/logo_dark.svg"
-    install -Dm0644 "res/icons/logo_dark.svg" "{{icons-dst}}/32x32/apps/logo_dark.svg"
-    install -Dm0644 "res/icons/logo_dark.svg" "{{icons-dst}}/24x24/apps/logo_dark.svg"
-    install -Dm0644 "res/icons/logo_dark.svg" "{{icons-dst}}/16x16/apps/logo_dark.svg"
-    # Install custom logo_dark_outline.svg icon
-    install -Dm0644 "res/icons/logo_dark_outline.svg" "{{icons-dst}}/256x256/apps/logo_dark_outline.svg"
-    install -Dm0644 "res/icons/logo_dark_outline.svg" "{{icons-dst}}/128x128/apps/logo_dark_outline.svg"
-    install -Dm0644 "res/icons/logo_dark_outline.svg" "{{icons-dst}}/64x64/apps/logo_dark_outline.svg"
-    install -Dm0644 "res/icons/logo_dark_outline.svg" "{{icons-dst}}/48x48/apps/logo_dark_outline.svg"
-    install -Dm0644 "res/icons/logo_dark_outline.svg" "{{icons-dst}}/32x32/apps/logo_dark_outline.svg"
-    install -Dm0644 "res/icons/logo_dark_outline.svg" "{{icons-dst}}/24x24/apps/logo_dark_outline.svg"
-    install -Dm0644 "res/icons/logo_dark_outline.svg" "{{icons-dst}}/16x16/apps/logo_dark_outline.svg"
+    # Install custom openvpn3_status_cosmic_logo_filled.svg icon for applet
+    install -Dm0644 "res/icons/openvpn3_status_cosmic_logo_filled.svg" "{{icons-dst}}/scalable/status/openvpn3_status_cosmic_logo_filled.svg"
+    # Install custom openvpn3_status_cosmic_logo_outline.svg icon
+    install -Dm0644 "res/icons/openvpn3_status_cosmic_logo_outline.svg" "{{icons-dst}}/scalable/status/openvpn3_status_cosmic_logo_outline.svg"
 
 # Uninstalls installed files
 uninstall:

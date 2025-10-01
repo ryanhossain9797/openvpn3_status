@@ -179,9 +179,9 @@ impl Application for OpenVpn3Status {
     fn view(&self) -> Element<'_, Self::Message> {
         let icon = match &self.state {
             AppState::Available { profiles, .. } if profiles.iter().any(|p| p.is_active()) => {
-                "logo_dark"
+                "openvpn3_status_cosmic_logo_filled"
             }
-            _ => "logo_dark_outline",
+            _ => "openvpn3_status_cosmic_logo_outline",
         };
 
         self.core
