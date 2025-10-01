@@ -7,85 +7,130 @@ use cosmic::iced_winit::commands::popup::{destroy_popup, get_popup};
 use cosmic::widget;
 use cosmic::{Application, Element};
 
-use crate::fl;
-use crate::core::openvpn::{get_openvpn_profiles, is_openvpn3_available, delete_openvpn_profile, disconnect_openvpn_session, import_openvpn_config, start_openvpn_session, is_profile_connecting, profile_requires_totp, OpenVPNProfile};
+use crate::core::{Credentials, OpenVpnClient, Profile};
 
-/// This is the struct that represents your application.
-/// It is used to define the data that will be used by your application.
+const AUTO_REFRESH_INTERVAL_SECS: u64 = 3;
+
+/// Main application state
 #[derive(Default)]
 pub struct OpenVpn3Status {
-    /// Application state which is managed by the COSMIC runtime.
     core: Core,
-    /// The popup id.
     popup: Option<Id>,
-    /// Example row toggler.
-    example_row: bool,
-    /// OpenVPN 3 profiles available on the system.
-    openvpn_profiles: Vec<OpenVPNProfile>,
-    /// Whether OpenVPN 3 is available on the system.
-    openvpn3_available: bool,
-    /// Import dialog popup id.
-    import_dialog: Option<Id>,
-    /// File path for import dialog.
-    import_file_path: String,
-    /// Custom name for import dialog.
-    import_custom_name: String,
-    /// Connect dialog popup id.
-    connect_dialog: Option<Id>,
-    /// Profile name for connect dialog.
-    connect_profile_name: String,
-    /// Username for connect dialog.
-    connect_username: String,
-    /// Password for connect dialog.
-    connect_password: String,
-    /// TOTP for connect dialog.
-    connect_totp: String,
-    /// Whether the current profile requires TOTP.
-    profile_requires_totp: bool,
+    client: OpenVpnClient,
+    state: AppState,
 }
 
-/// This is the enum that contains all the possible variants that your application will need to transmit messages.
-/// This is used to communicate between the different parts of your application.
-/// If your application does not need to send messages, you can use an empty enum or `()`.
+/// Application state container
+#[derive(Default)]
+struct AppState {
+    profiles: Vec<Profile>,
+    openvpn_available: bool,
+    dialog: DialogState,
+}
+
+/// Dialog state management
+#[derive(Default)]
+enum DialogState {
+    #[default]
+    None,
+    Import(ImportDialog),
+    Connect(ConnectDialog),
+}
+
+/// Import dialog state
+struct ImportDialog {
+    id: Id,
+    file_path: String,
+    custom_name: String,
+}
+
+impl ImportDialog {
+    fn new(id: Id) -> Self {
+        Self {
+            id,
+            file_path: String::new(),
+            custom_name: String::new(),
+        }
+    }
+}
+
+/// Connect dialog state
+struct ConnectDialog {
+    id: Id,
+    profile_name: String,
+    username: String,
+    password: String,
+    totp: String,
+    requires_totp: bool,
+}
+
+impl ConnectDialog {
+    fn new(id: Id, profile_name: String, requires_totp: bool) -> Self {
+        Self {
+            id,
+            profile_name,
+            username: String::new(),
+            password: String::new(),
+            totp: String::new(),
+            requires_totp,
+        }
+    }
+
+    fn build_credentials(&self) -> Credentials {
+        let mut creds = Credentials::new(&self.username, &self.password);
+        if !self.totp.trim().is_empty() {
+            creds = creds.with_totp(&self.totp);
+        }
+        creds
+    }
+
+    fn is_valid(&self) -> bool {
+        !self.username.trim().is_empty()
+            && !self.password.trim().is_empty()
+            && (!self.requires_totp || !self.totp.trim().is_empty())
+    }
+}
+
+/// Application messages
 #[derive(Debug, Clone)]
 pub enum Message {
+    // Window management
     TogglePopup,
     PopupClosed(Id),
-    // ToggleExampleRow(bool), // Example row - commented out but kept for reference
-    DeleteProfile(String), // Profile name to delete
-    DisconnectSession(String), // Profile name to disconnect
-    RefreshProfiles, // Refresh OpenVPN profiles and session status
-    ImportConfig, // Open import dialog
-    ImportDialogClosed(Id), // Import dialog was closed
-    ImportFilePathChanged(String), // File path input changed
-    ImportCustomNameChanged(String), // Custom name input changed
-    ImportConfigSubmit, // Submit the import form
-    ConfigImported(String, Option<String>), // Config file path and custom name that was imported
-    ConnectProfile(String), // Open connect dialog for profile
-    ConnectDialogClosed(Id), // Connect dialog was closed
-    ConnectUsernameChanged(String), // Username input changed
-    ConnectPasswordChanged(String), // Password input changed
-    ConnectTotpChanged(String), // TOTP input changed
-    ConnectSubmit, // Submit the connect form
-    SessionStarted(String), // Session started for profile
-    AutoRefresh, // Automatic refresh triggered by connecting states
+
+    // Profile operations
+    RefreshProfiles,
+    ProfilesLoaded(Result<Vec<Profile>, String>),
+    DeleteProfile(String),
+    ProfileDeleted(String, Result<(), String>),
+    DisconnectSession(String),
+    SessionDisconnected(String, Result<(), String>),
+
+    // Import dialog
+    OpenImportDialog,
+    CloseImportDialog(Id),
+    ImportFilePathChanged(String),
+    ImportCustomNameChanged(String),
+    SubmitImport,
+    ConfigImported(Result<String, String>),
+
+    // Connect dialog
+    OpenConnectDialog { profile_name: String, requires_totp: bool },
+    CloseConnectDialog(Id),
+    ConnectUsernameChanged(String),
+    ConnectPasswordChanged(String),
+    ConnectTotpChanged(String),
+    SubmitConnect,
+    SessionStarted(Result<(), String>),
+
+    // Auto-refresh
+    AutoRefresh,
 }
 
-/// Implement the `Application` trait for your application.
-/// This is where you define the behavior of your application.
-///
-/// The `Application` trait requires you to define the following types and constants:
-/// - `Executor` is the async executor that will be used to run your application's commands.
-/// - `Flags` is the data that your application needs to use before it starts.
-/// - `Message` is the enum that contains all the possible variants that your application will need to transmit messages.
-/// - `APP_ID` is the unique identifier of your application.
 impl Application for OpenVpn3Status {
     type Executor = cosmic::executor::Default;
-
     type Flags = ();
-
     type Message = Message;
-
     const APP_ID: &'static str = "com.system76.OpenVPN3Status";
 
     fn core(&self) -> &Core {
@@ -96,409 +141,190 @@ impl Application for OpenVpn3Status {
         &mut self.core
     }
 
-    /// This is the entry point of your application, it is where you initialize your application.
-    ///
-    /// Any work that needs to be done before the application starts should be done here.
-    ///
-    /// - `core` is used to passed on for you by libcosmic to use in the core of your own application.
-    /// - `flags` is used to pass in any data that your application needs to use before it starts.
-    /// - `Command` type is used to send messages to your application. `Command::none()` can be used to send no messages to your application.
     fn init(core: Core, _flags: Self::Flags) -> (Self, Task<Self::Message>) {
-        let openvpn3_available = is_openvpn3_available();
-        
-        // Load OpenVPN profiles synchronously if available
-        let openvpn_profiles = if openvpn3_available {
-            get_openvpn_profiles().unwrap_or_default()
-        } else {
-            Vec::new()
-        };
-        
-        let app = OpenVpn3Status {
+        let client = OpenVpnClient::new();
+        let app = Self {
             core,
-            openvpn_profiles,
-            openvpn3_available,
-            ..Default::default()
+            popup: None,
+            client,
+            state: AppState::default(),
         };
 
-        (app, Task::none())
+        // Initialize async
+        let task = Task::perform(
+            async {
+                let available = OpenVpnClient::is_available().await;
+                (available, available)
+            },
+            |(available, should_load)| {
+                if should_load {
+                    cosmic::Action::App(Message::RefreshProfiles)
+                } else {
+                    cosmic::Action::App(Message::ProfilesLoaded(Ok(Vec::new())))
+                }
+            },
+        );
+
+        (app, task)
     }
 
     fn on_close_requested(&self, id: Id) -> Option<Message> {
         Some(Message::PopupClosed(id))
     }
 
-    /// This is the main view of your application, it is the root of your widget tree.
-    ///
-    /// The `Element` type is used to represent the visual elements of your application,
-    /// it has a `Message` associated with it, which dictates what type of message it can send.
-    ///
-    /// To get a better sense of which widgets are available, check out the `widget` module.
     fn view(&self) -> Element<'_, Self::Message> {
+        let icon = if self.state.profiles.iter().any(|p| p.is_active()) {
+            "logo_dark"
+        } else {
+            "logo_dark_outline"
+        };
+
         self.core
             .applet
-            .icon_button("display-symbolic")
+            .icon_button(icon)
             .on_press(Message::TogglePopup)
             .into()
     }
 
     fn view_window(&self, _id: Id) -> Element<'_, Self::Message> {
-        let mut content = widget::column()
-            .spacing(10)
-            .padding(20);
-
-        // Add OpenVPN 3 profiles if available
-        if self.openvpn3_available {
-            // Add header with title
-            content = content.push(widget::text("OpenVPN 3 Profiles").size(18));
-            
-            // Add refresh and import buttons
-            let refresh_button = widget::button::text("Refresh")
-                .on_press(Message::RefreshProfiles);
-            let import_button = widget::button::text("Import Config")
-                .on_press(Message::ImportConfig);
-            
-            let button_row = widget::row()
-                .push(refresh_button)
-                .push(import_button)
-                .spacing(10);
-            
-            content = content.push(button_row);
-            content = content.push(widget::horizontal_space());
-            
-            if self.openvpn_profiles.is_empty() {
-                content = content.push(widget::text("No profiles found"));
-            } else {
-                // Add each profile
-                for profile in &self.openvpn_profiles {
-                    let profile_row = if profile.is_active {
-                        // Show disconnect button for active sessions
-                        let disconnect_button = widget::button::text("Disconnect")
-                            .on_press(Message::DisconnectSession(profile.name.clone()));
-                        
-                        widget::row()
-                            .push(widget::text(&profile.name).width(cosmic::iced::Length::Fill))
-                            .push(disconnect_button)
-                            .spacing(10)
-                    } else {
-                        // Show connect and delete buttons for inactive profiles
-                        let connect_button = widget::button::text("Connect")
-                            .on_press(Message::ConnectProfile(profile.name.clone()));
-                        let delete_button = widget::button::text("Delete")
-                            .on_press(Message::DeleteProfile(profile.name.clone()));
-                        
-                        widget::row()
-                            .push(widget::text(&profile.name).width(cosmic::iced::Length::Fill))
-                            .push(connect_button)
-                            .push(delete_button)
-                            .spacing(10)
-                    };
-                    
-                    content = content.push(profile_row);
-                }
-            }
-        } else {
-            content = content.push(widget::text("OpenVPN 3 not available"));
-        }
-
-        // Show modal dialogs - if any dialog is open, only show that dialog
-        if let Some(import_dialog_id) = self.import_dialog {
-            let import_dialog = self.view_import_dialog(import_dialog_id);
-            self.core.applet.popup_container(import_dialog).into()
-        } else if let Some(connect_dialog_id) = self.connect_dialog {
-            let connect_dialog = self.view_connect_dialog(connect_dialog_id);
-            self.core.applet.popup_container(connect_dialog).into()
-        } else {
-            // No dialogs open, show main content
-            self.core.applet.popup_container(content).into()
+        match &self.state.dialog {
+            DialogState::Import(dialog) => self.view_import_dialog(dialog),
+            DialogState::Connect(dialog) => self.view_connect_dialog(dialog),
+            DialogState::None => self.view_main_content(),
         }
     }
 
-    /// Application messages are handled here. The application state can be modified based on
-    /// what message was received. Commands may be returned for asynchronous execution on a
-    /// background thread managed by the application's executor.
     fn update(&mut self, message: Self::Message) -> Task<Self::Message> {
         match message {
-            Message::TogglePopup => {
-                return if let Some(p) = self.popup.take() {
-                    destroy_popup(p)
-                } else {
-                    // Refresh OpenVPN profiles and session status when opening popup
-                    if self.openvpn3_available {
-                        self.openvpn_profiles = get_openvpn_profiles().unwrap_or_default();
-                    }
-                    
-                    let new_id = Id::unique();
-                    self.popup.replace(new_id);
-                    let mut popup_settings = self.core.applet.get_popup_settings(
-                        self.core.main_window_id().unwrap(),
-                        new_id,
-                        None,
-                        None,
-                        None,
-                    );
-                    popup_settings.positioner.size_limits = Limits::NONE
-                        .max_width(372.0)
-                        .min_width(300.0)
-                        .min_height(200.0)
-                        .max_height(1080.0);
-                    get_popup(popup_settings)
-                }
+            Message::TogglePopup => self.handle_toggle_popup(),
+            Message::PopupClosed(id) => self.handle_popup_closed(id),
+            Message::RefreshProfiles => self.handle_refresh_profiles(),
+            Message::ProfilesLoaded(result) => self.handle_profiles_loaded(result),
+            Message::DeleteProfile(name) => self.handle_delete_profile(name),
+            Message::ProfileDeleted(name, result) => self.handle_profile_deleted(name, result),
+            Message::DisconnectSession(name) => self.handle_disconnect_session(name),
+            Message::SessionDisconnected(name, result) => {
+                self.handle_session_disconnected(name, result)
             }
-            Message::PopupClosed(id) => {
-                if self.popup.as_ref() == Some(&id) {
-                    self.popup = None;
-                }
-            }
-            // Message::ToggleExampleRow(toggled) => self.example_row = toggled,
-            Message::DeleteProfile(profile_name) => {
-                // Don't allow profile deletion when dialogs are open
-                if self.import_dialog.is_some() || self.connect_dialog.is_some() {
-                    eprintln!("Cannot delete profile while dialog is open");
-                    return Task::none();
-                }
-                
-                // Actually delete the profile from OpenVPN 3 system
-                match delete_openvpn_profile(&profile_name) {
-                    Ok(_) => {
-                        // Remove the profile from the list only if deletion was successful
-                        self.openvpn_profiles.retain(|profile| profile.name != profile_name);
-                    }
-                    Err(error) => {
-                        // TODO: Show error message to user
-                        eprintln!("Failed to delete profile '{}': {}", profile_name, error);
-                    }
-                }
-            }
-            Message::DisconnectSession(profile_name) => {
-                // Don't allow session disconnection when dialogs are open
-                if self.import_dialog.is_some() || self.connect_dialog.is_some() {
-                    eprintln!("Cannot disconnect session while dialog is open");
-                    return Task::none();
-                }
-                
-                // Disconnect the active session
-                match disconnect_openvpn_session(&profile_name) {
-                    Ok(_) => {
-                        // Session disconnected successfully
-                        eprintln!("Successfully disconnected session for profile '{}'", profile_name);
-                        // Refresh the profiles list to show the updated session status
-                        if self.openvpn3_available {
-                            self.openvpn_profiles = get_openvpn_profiles().unwrap_or_default();
-                        }
-                    }
-                    Err(error) => {
-                        // TODO: Show error message to user
-                        eprintln!("Failed to disconnect session for profile '{}': {}", profile_name, error);
-                    }
-                }
-            }
-            Message::RefreshProfiles => {
-                // Refresh OpenVPN profiles and session status
-                if self.openvpn3_available {
-                    self.openvpn_profiles = get_openvpn_profiles().unwrap_or_default();
-                    eprintln!("Refreshed OpenVPN profiles: {} profiles found", self.openvpn_profiles.len());
-                    
-                    // Check if any profiles are in connecting state and schedule auto-refresh
-                    let has_connecting = self.openvpn_profiles.iter().any(|profile| is_profile_connecting(&profile.name));
-                    if has_connecting {
-                        eprintln!("Found connecting profiles, scheduling auto-refresh in 3 seconds");
-                        return Task::perform(
-                            async {
-                                tokio::time::sleep(tokio::time::Duration::from_secs(3)).await;
-                            },
-                            |_| cosmic::Action::App(Message::AutoRefresh),
-                        );
-                    }
-                }
-            }
-            Message::AutoRefresh => {
-                // Automatic refresh triggered by connecting states
-                if self.openvpn3_available {
-                    self.openvpn_profiles = get_openvpn_profiles().unwrap_or_default();
-                    eprintln!("Auto-refreshed OpenVPN profiles: {} profiles found", self.openvpn_profiles.len());
-                    
-                    // Check again if any profiles are still connecting and schedule another refresh
-                    let has_connecting = self.openvpn_profiles.iter().any(|profile| is_profile_connecting(&profile.name));
-                    if has_connecting {
-                        eprintln!("Still found connecting profiles, scheduling another auto-refresh in 3 seconds");
-                        return Task::perform(
-                            async {
-                                tokio::time::sleep(tokio::time::Duration::from_secs(3)).await;
-                            },
-                            |_| cosmic::Action::App(Message::AutoRefresh),
-                        );
-                    } else {
-                        eprintln!("No more connecting profiles, stopping auto-refresh");
-                    }
-                }
-            }
-            Message::ImportConfig => {
-                // Don't open import dialog if another dialog is already open
-                if self.connect_dialog.is_some() {
-                    eprintln!("Cannot open import dialog while connect dialog is open");
-                    return Task::none();
-                }
-                
-                // Open import dialog
-                let import_dialog_id = Id::unique();
-                self.import_dialog = Some(import_dialog_id);
-                self.import_file_path.clear();
-                self.import_custom_name.clear();
-                eprintln!("Opening import dialog");
-            }
-            Message::ImportDialogClosed(id) => {
-                if self.import_dialog == Some(id) {
-                    self.import_dialog = None;
-                }
-            }
+            Message::OpenImportDialog => self.handle_open_import_dialog(),
+            Message::CloseImportDialog(id) => self.handle_close_import_dialog(id),
             Message::ImportFilePathChanged(path) => {
-                self.import_file_path = path;
+                self.handle_import_file_path_changed(path);
+                Task::none()
             }
             Message::ImportCustomNameChanged(name) => {
-                self.import_custom_name = name;
+                self.handle_import_custom_name_changed(name);
+                Task::none()
             }
-            Message::ImportConfigSubmit => {
-                if !self.import_file_path.trim().is_empty() {
-                    let custom_name = if self.import_custom_name.trim().is_empty() {
-                        None
-                    } else {
-                        Some(self.import_custom_name.trim())
-                    };
-                    // Close the dialog
-                    self.import_dialog = None;
-                    // Import the config
-                    match import_openvpn_config(&self.import_file_path, custom_name) {
-                        Ok(profile_name) => {
-                            eprintln!("Successfully imported config '{}' as profile '{}'", self.import_file_path, profile_name);
-                        }
-                        Err(error) => {
-                            eprintln!("Failed to import config '{}': {}", self.import_file_path, error);
-                        }
-                    }
-                    // Always refresh the profiles list after import attempt
-                    if self.openvpn3_available {
-                        self.openvpn_profiles = get_openvpn_profiles().unwrap_or_default();
-                    }
-                }
+            Message::SubmitImport => self.handle_submit_import(),
+            Message::ConfigImported(result) => self.handle_config_imported(result),
+            Message::OpenConnectDialog { profile_name, requires_totp } => {
+                self.handle_open_connect_dialog(profile_name, requires_totp)
             }
-            Message::ConfigImported(config_path, custom_name) => {
-                // Handle imported config file with custom name
-                match import_openvpn_config(&config_path, custom_name.as_deref()) {
-                    Ok(profile_name) => {
-                        eprintln!("Successfully imported config '{}' as profile '{}'", config_path, profile_name);
-                        // Refresh the profiles list to show the new profile
-                        if self.openvpn3_available {
-                            self.openvpn_profiles = get_openvpn_profiles().unwrap_or_default();
-                        }
-                    }
-                    Err(error) => {
-                        eprintln!("Failed to import config '{}': {}", config_path, error);
-                    }
-                }
-            }
-            Message::ConnectProfile(profile_name) => {
-                // Don't open connect dialog if another dialog is already open
-                if self.import_dialog.is_some() {
-                    eprintln!("Cannot open connect dialog while import dialog is open");
-                    return Task::none();
-                }
-                
-                // Check if this profile requires TOTP
-                let requires_totp = profile_requires_totp(&profile_name);
-                eprintln!("Profile '{}' requires TOTP: {}", profile_name, requires_totp);
-                
-                // Open connect dialog
-                let connect_dialog_id = Id::unique();
-                self.connect_dialog = Some(connect_dialog_id);
-                self.connect_profile_name = profile_name;
-                self.connect_username.clear();
-                self.connect_password.clear();
-                self.connect_totp.clear();
-                self.profile_requires_totp = requires_totp;
-                eprintln!("Opening connect dialog for profile: {}", self.connect_profile_name);
-            }
-            Message::ConnectDialogClosed(id) => {
-                if self.connect_dialog == Some(id) {
-                    self.connect_dialog = None;
-                }
-            }
+            Message::CloseConnectDialog(id) => self.handle_close_connect_dialog(id),
             Message::ConnectUsernameChanged(username) => {
-                self.connect_username = username;
+                self.handle_connect_username_changed(username);
+                Task::none()
             }
             Message::ConnectPasswordChanged(password) => {
-                self.connect_password = password;
+                self.handle_connect_password_changed(password);
+                Task::none()
             }
             Message::ConnectTotpChanged(totp) => {
-                self.connect_totp = totp;
+                self.handle_connect_totp_changed(totp);
+                Task::none()
             }
-            Message::ConnectSubmit => {
-                // Validate required fields
-                let username_valid = !self.connect_username.trim().is_empty();
-                let password_valid = !self.connect_password.trim().is_empty();
-                let totp_valid = !self.profile_requires_totp || !self.connect_totp.trim().is_empty();
-                
-                if username_valid && password_valid && totp_valid {
-                    let totp = if self.connect_totp.trim().is_empty() {
-                        None
-                    } else {
-                        Some(self.connect_totp.trim())
-                    };
-                    // Close the dialog
-                    self.connect_dialog = None;
-                    // Start the session
-                    match start_openvpn_session(&self.connect_profile_name, &self.connect_username, &self.connect_password, totp) {
-                        Ok(message) => {
-                            eprintln!("{}", message);
-                        }
-                        Err(error) => {
-                            eprintln!("Failed to start session for profile '{}': {}", self.connect_profile_name, error);
-                        }
-                    }
-                    // Always refresh the profiles list after connection attempt
-                    if self.openvpn3_available {
-                        self.openvpn_profiles = get_openvpn_profiles().unwrap_or_default();
-                    }
-                } else {
-                    eprintln!("Please fill in all required fields");
-                }
-            }
-            Message::SessionStarted(profile_name) => {
-                eprintln!("Session started for profile: {}", profile_name);
-                // Refresh the profiles list to show the new session status
-                if self.openvpn3_available {
-                    self.openvpn_profiles = get_openvpn_profiles().unwrap_or_default();
-                }
-            }
+            Message::SubmitConnect => self.handle_submit_connect(),
+            Message::SessionStarted(result) => self.handle_session_started(result),
+            Message::AutoRefresh => self.handle_auto_refresh(),
         }
-        Task::none()
     }
-
 
     fn style(&self) -> Option<cosmic::iced_runtime::Appearance> {
         Some(cosmic::applet::style())
     }
 }
 
+// View methods
 impl OpenVpn3Status {
-    /// View for the import dialog
-    fn view_import_dialog(&self, id: Id) -> Element<Message> {
-        let file_path_input = widget::text_input("File path", &self.import_file_path)
+    fn view_main_content(&self) -> Element<'_, Message> {
+        let mut content = widget::column().spacing(10).padding(20);
+
+        if !self.state.openvpn_available {
+            content = content.push(widget::text("OpenVPN 3 not available").size(16));
+            return self.core.applet.popup_container(content).into();
+        }
+
+        // Header
+        content = content.push(widget::text("OpenVPN 3 Profiles").size(18));
+
+        // Action buttons
+        let refresh_button = widget::button::text("Refresh").on_press(Message::RefreshProfiles);
+        let import_button = widget::button::text("Import Config").on_press(Message::OpenImportDialog);
+        let button_row = widget::row()
+            .push(refresh_button)
+            .push(import_button)
+            .spacing(10);
+        content = content.push(button_row);
+        content = content.push(widget::horizontal_space());
+
+        // Profiles list
+        if self.state.profiles.is_empty() {
+            content = content.push(widget::text("No profiles found"));
+        } else {
+            for profile in &self.state.profiles {
+                content = content.push(self.view_profile_row(profile));
+            }
+        }
+
+        self.core.applet.popup_container(content).into()
+    }
+
+    fn view_profile_row<'a>(&'a self, profile: &'a Profile) -> Element<'a, Message> {
+        let name_text = widget::text(&profile.name).width(cosmic::iced::Length::Fill);
+
+        let row = if profile.is_active() {
+            let disconnect_btn = widget::button::text("Disconnect")
+                .on_press(Message::DisconnectSession(profile.name.clone()));
+            widget::row()
+                .push(name_text)
+                .push(disconnect_btn)
+                .spacing(10)
+        } else {
+            let connect_btn = widget::button::text("Connect").on_press(
+                Message::OpenConnectDialog {
+                    profile_name: profile.name.clone(),
+                    requires_totp: false, // Will be determined when dialog opens
+                }
+            );
+            let delete_btn =
+                widget::button::text("Delete").on_press(Message::DeleteProfile(profile.name.clone()));
+            widget::row()
+                .push(name_text)
+                .push(connect_btn)
+                .push(delete_btn)
+                .spacing(10)
+        };
+
+        row.into()
+    }
+
+    fn view_import_dialog<'a>(&'a self, dialog: &'a ImportDialog) -> Element<'a, Message> {
+        let file_path_input = widget::text_input("File path", &dialog.file_path)
             .on_input(Message::ImportFilePathChanged);
-        
-        let custom_name_input = widget::text_input("Custom name (optional)", &self.import_custom_name)
+
+        let custom_name_input = widget::text_input("Custom name (optional)", &dialog.custom_name)
             .on_input(Message::ImportCustomNameChanged);
-        
-        let submit_button = widget::button::text("Import")
-            .on_press(Message::ImportConfigSubmit);
-        
-        let cancel_button = widget::button::text("Cancel")
-            .on_press(Message::ImportDialogClosed(id));
-        
+
+        let submit_button = widget::button::text("Import").on_press(Message::SubmitImport);
+        let cancel_button =
+            widget::button::text("Cancel").on_press(Message::CloseImportDialog(dialog.id));
+
         let button_row = widget::row()
             .push(submit_button)
             .push(cancel_button)
             .spacing(10);
-        
+
         let dialog_content = widget::column()
             .push(widget::text("Import OpenVPN Config"))
             .push(file_path_input)
@@ -506,56 +332,365 @@ impl OpenVpn3Status {
             .push(button_row)
             .spacing(10)
             .padding(20);
-        
-        widget::container(dialog_content)
-            .width(400)
-            .height(200)
-            .into()
+
+        let container = widget::container(dialog_content).width(400).height(200);
+
+        self.core.applet.popup_container(container).into()
     }
-    
-    /// View for the connect dialog
-    fn view_connect_dialog(&self, id: Id) -> Element<Message> {
-        let username_input = widget::text_input("Username", &self.connect_username)
-            .on_input(Message::ConnectUsernameChanged);
-        
-        let password_input = widget::text_input("Password", &self.connect_password)
-            .password()
-            .on_input(Message::ConnectPasswordChanged);
-        
-        let mut dialog_content = widget::column()
-            .push(widget::text("Connect to VPN"))
-            .push(username_input)
-            .push(password_input);
-        
-        // Only show TOTP field if the profile requires it
-        if self.profile_requires_totp {
-            let totp_input = widget::text_input("TOTP Code (required)", &self.connect_totp)
-                .on_input(Message::ConnectTotpChanged);
-            dialog_content = dialog_content.push(totp_input);
+
+    fn view_connect_dialog<'a>(&'a self, dialog: &'a ConnectDialog) -> Element<'a, Message> {
+        let mut content = widget::column()
+            .push(widget::text(format!("Connect to {}", dialog.profile_name)))
+            .push(
+                widget::text_input("Username", &dialog.username)
+                    .on_input(Message::ConnectUsernameChanged),
+            )
+            .push(
+                widget::text_input("Password", &dialog.password)
+                    .password()
+                    .on_input(Message::ConnectPasswordChanged),
+            );
+
+        if dialog.requires_totp {
+            content = content.push(
+                widget::text_input("TOTP Code (required)", &dialog.totp)
+                    .on_input(Message::ConnectTotpChanged),
+            );
         }
-        
-        let connect_button = widget::button::text("Connect")
-            .on_press(Message::ConnectSubmit);
-        
-        let cancel_button = widget::button::text("Cancel")
-            .on_press(Message::ConnectDialogClosed(id));
-        
+
+        let connect_button = widget::button::text("Connect").on_press(Message::SubmitConnect);
+        let cancel_button =
+            widget::button::text("Cancel").on_press(Message::CloseConnectDialog(dialog.id));
+
         let button_row = widget::row()
             .push(connect_button)
             .push(cancel_button)
             .spacing(10);
-        
-        dialog_content = dialog_content
-            .push(button_row)
-            .spacing(10)
-            .padding(20);
-        
-        // Adjust height based on whether TOTP field is shown
-        let height = if self.profile_requires_totp { 280 } else { 250 };
-        
-        widget::container(dialog_content)
-            .width(400)
-            .height(height)
-            .into()
+
+        content = content.push(button_row).spacing(10).padding(20);
+
+        let height = if dialog.requires_totp { 280 } else { 250 };
+        let container = widget::container(content).width(400).height(height);
+
+        self.core.applet.popup_container(container).into()
+    }
+}
+
+// Message handlers
+impl OpenVpn3Status {
+    fn handle_toggle_popup(&mut self) -> Task<Message> {
+        if let Some(p) = self.popup.take() {
+            destroy_popup(p)
+        } else {
+            // Refresh when opening
+            let refresh_task = if self.state.openvpn_available {
+                self.handle_refresh_profiles()
+            } else {
+                Task::none()
+            };
+
+            let new_id = Id::unique();
+            self.popup.replace(new_id);
+            let mut popup_settings = self.core.applet.get_popup_settings(
+                self.core.main_window_id().unwrap(),
+                new_id,
+                None,
+                None,
+                None,
+            );
+            popup_settings.positioner.size_limits = Limits::NONE
+                .max_width(372.0)
+                .min_width(300.0)
+                .min_height(200.0)
+                .max_height(1080.0);
+
+            Task::batch(vec![get_popup(popup_settings), refresh_task])
+        }
+    }
+
+    fn handle_popup_closed(&mut self, id: Id) -> Task<Message> {
+        if self.popup.as_ref() == Some(&id) {
+            self.popup = None;
+        }
+        Task::none()
+    }
+
+    fn handle_refresh_profiles(&mut self) -> Task<Message> {
+        let client = self.client.clone();
+        Task::perform(
+            async move {
+                client
+                    .get_profiles()
+                    .await
+                    .map_err(|e| e.to_string())
+            },
+            |result| cosmic::Action::App(Message::ProfilesLoaded(result)),
+        )
+    }
+
+    fn handle_profiles_loaded(&mut self, result: Result<Vec<Profile>, String>) -> Task<Message> {
+        match result {
+            Ok(profiles) => {
+                self.state.openvpn_available = true;
+                let has_connecting = profiles.iter().any(|p| p.is_connecting());
+                self.state.profiles = profiles;
+
+                if has_connecting {
+                    Task::perform(
+                        async {
+                            tokio::time::sleep(tokio::time::Duration::from_secs(
+                                AUTO_REFRESH_INTERVAL_SECS,
+                            ))
+                            .await;
+                        },
+                        |_| cosmic::Action::App(Message::AutoRefresh),
+                    )
+                } else {
+                    Task::none()
+                }
+            }
+            Err(e) => {
+                eprintln!("Failed to load profiles: {}", e);
+                Task::none()
+            }
+        }
+    }
+
+    fn handle_delete_profile(&mut self, name: String) -> Task<Message> {
+        // Don't allow if dialog is open
+        if !matches!(self.state.dialog, DialogState::None) {
+            eprintln!("Cannot delete profile while dialog is open");
+            return Task::none();
+        }
+
+        let client = self.client.clone();
+        Task::perform(
+            async move {
+                let result = client.delete_profile(&name).await.map_err(|e| e.to_string());
+                (name, result)
+            },
+            |(name, result)| cosmic::Action::App(Message::ProfileDeleted(name, result)),
+        )
+    }
+
+    fn handle_profile_deleted(&mut self, name: String, result: Result<(), String>) -> Task<Message> {
+        match result {
+            Ok(_) => {
+                self.state.profiles.retain(|p| p.name != name);
+                Task::none()
+            }
+            Err(e) => {
+                eprintln!("Failed to delete profile '{}': {}", name, e);
+                Task::none()
+            }
+        }
+    }
+
+    fn handle_disconnect_session(&mut self, name: String) -> Task<Message> {
+        // Don't allow if dialog is open
+        if !matches!(self.state.dialog, DialogState::None) {
+            eprintln!("Cannot disconnect session while dialog is open");
+            return Task::none();
+        }
+
+        let client = self.client.clone();
+        Task::perform(
+            async move {
+                let result = client.disconnect_profile(&name).await.map_err(|e| e.to_string());
+                (name, result)
+            },
+            |(name, result)| cosmic::Action::App(Message::SessionDisconnected(name, result)),
+        )
+    }
+
+    fn handle_session_disconnected(
+        &mut self,
+        name: String,
+        result: Result<(), String>,
+    ) -> Task<Message> {
+        match result {
+            Ok(_) => {
+                eprintln!("Successfully disconnected session for '{}'", name);
+                self.handle_refresh_profiles()
+            }
+            Err(e) => {
+                eprintln!("Failed to disconnect session for '{}': {}", name, e);
+                Task::none()
+            }
+        }
+    }
+
+    fn handle_open_import_dialog(&mut self) -> Task<Message> {
+        // Don't open if another dialog is open
+        if !matches!(self.state.dialog, DialogState::None) {
+            return Task::none();
+        }
+
+        let id = Id::unique();
+        self.state.dialog = DialogState::Import(ImportDialog::new(id));
+        Task::none()
+    }
+
+    fn handle_close_import_dialog(&mut self, id: Id) -> Task<Message> {
+        if let DialogState::Import(dialog) = &self.state.dialog {
+            if dialog.id == id {
+                self.state.dialog = DialogState::None;
+            }
+        }
+        Task::none()
+    }
+
+    fn handle_import_file_path_changed(&mut self, path: String) {
+        if let DialogState::Import(dialog) = &mut self.state.dialog {
+            dialog.file_path = path;
+        }
+    }
+
+    fn handle_import_custom_name_changed(&mut self, name: String) {
+        if let DialogState::Import(dialog) = &mut self.state.dialog {
+            dialog.custom_name = name;
+        }
+    }
+
+    fn handle_submit_import(&mut self) -> Task<Message> {
+        let (file_path, custom_name) = match &self.state.dialog {
+            DialogState::Import(dialog) => {
+                if dialog.file_path.trim().is_empty() {
+                    return Task::none();
+                }
+                let name = if dialog.custom_name.trim().is_empty() {
+                    None
+                } else {
+                    Some(dialog.custom_name.trim().to_string())
+                };
+                (dialog.file_path.clone(), name)
+            }
+            _ => return Task::none(),
+        };
+
+        self.state.dialog = DialogState::None;
+
+        let client = self.client.clone();
+        Task::perform(
+            async move {
+                client
+                    .import_config(&file_path, custom_name.as_deref())
+                    .await
+                    .map_err(|e| e.to_string())
+            },
+            |result| cosmic::Action::App(Message::ConfigImported(result)),
+        )
+    }
+
+    fn handle_config_imported(&mut self, result: Result<String, String>) -> Task<Message> {
+        match result {
+            Ok(name) => {
+                eprintln!("Successfully imported profile '{}'", name);
+                self.handle_refresh_profiles()
+            }
+            Err(e) => {
+                eprintln!("Failed to import config: {}", e);
+                Task::none()
+            }
+        }
+    }
+
+    fn handle_open_connect_dialog(&mut self, profile_name: String, requires_totp: bool) -> Task<Message> {
+        // Don't open if another dialog is open
+        if !matches!(self.state.dialog, DialogState::None) {
+            return Task::none();
+        }
+
+        // If requires_totp is false, we need to check; otherwise just open the dialog
+        if !requires_totp {
+            let client = self.client.clone();
+            let name = profile_name.clone();
+
+            return Task::perform(
+                async move {
+                    let requires_totp = client.check_totp_required(&name).await.unwrap_or(false);
+                    (name, requires_totp)
+                },
+                |(name, requires_totp)| cosmic::Action::App(Message::OpenConnectDialog {
+                    profile_name: name,
+                    requires_totp,
+                }),
+            );
+        }
+
+        // Open the dialog directly
+        let id = Id::unique();
+        self.state.dialog = DialogState::Connect(ConnectDialog::new(id, profile_name, requires_totp));
+        Task::none()
+    }
+
+    fn handle_close_connect_dialog(&mut self, id: Id) -> Task<Message> {
+        if let DialogState::Connect(dialog) = &self.state.dialog {
+            if dialog.id == id {
+                self.state.dialog = DialogState::None;
+            }
+        }
+        Task::none()
+    }
+
+    fn handle_connect_username_changed(&mut self, username: String) {
+        if let DialogState::Connect(dialog) = &mut self.state.dialog {
+            dialog.username = username;
+        }
+    }
+
+    fn handle_connect_password_changed(&mut self, password: String) {
+        if let DialogState::Connect(dialog) = &mut self.state.dialog {
+            dialog.password = password;
+        }
+    }
+
+    fn handle_connect_totp_changed(&mut self, totp: String) {
+        if let DialogState::Connect(dialog) = &mut self.state.dialog {
+            dialog.totp = totp;
+        }
+    }
+
+    fn handle_submit_connect(&mut self) -> Task<Message> {
+        let (profile_name, credentials) = match &self.state.dialog {
+            DialogState::Connect(dialog) => {
+                if !dialog.is_valid() {
+                    eprintln!("Please fill in all required fields");
+                    return Task::none();
+                }
+                (dialog.profile_name.clone(), dialog.build_credentials())
+            }
+            _ => return Task::none(),
+        };
+
+        self.state.dialog = DialogState::None;
+
+        let client = self.client.clone();
+        Task::perform(
+            async move {
+                client
+                    .start_session(&profile_name, &credentials)
+                    .await
+                    .map_err(|e| e.to_string())
+            },
+            |result| cosmic::Action::App(Message::SessionStarted(result)),
+        )
+    }
+
+    fn handle_session_started(&mut self, result: Result<(), String>) -> Task<Message> {
+        match result {
+            Ok(_) => {
+                eprintln!("Successfully started session");
+                self.handle_refresh_profiles()
+            }
+            Err(e) => {
+                eprintln!("Failed to start session: {}", e);
+                Task::none()
+            }
+        }
+    }
+
+    fn handle_auto_refresh(&mut self) -> Task<Message> {
+        self.handle_refresh_profiles()
     }
 }

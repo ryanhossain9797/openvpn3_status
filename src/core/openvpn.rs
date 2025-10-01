@@ -1,386 +1,379 @@
 // SPDX-License-Identifier: GPL-3.0-only
 
-use serde::{Deserialize, Serialize};
-use std::process::Command;
+use super::error::{Error, Result};
+use super::types::*;
+use std::path::Path;
+use tokio::io::AsyncWriteExt;
+use tokio::process::Command;
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct OpenVPNProfile {
-    pub name: String,
-    pub path: String,
-    pub is_active: bool,
-}
+/// OpenVPN 3 client interface
+#[derive(Debug, Clone, Copy, Default)]
+pub struct OpenVpnClient;
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct OpenVPNProfileData {
-    pub name: String,
-    pub valid: bool,
-    pub imported: String,
-    pub lastused: String,
-    pub use_count: u32,
-}
-
-
-type OpenVPNConfigsMap = std::collections::HashMap<String, OpenVPNProfileData>;
-
-/// Fetches the list of OpenVPN 3 profiles from the system with their connection status
-pub fn get_openvpn_profiles() -> Result<Vec<OpenVPNProfile>, String> {
-    let output = Command::new("openvpn3")
-        .args(&["configs-list", "--json"])
-        .output()
-        .map_err(|e| format!("Failed to execute openvpn3 command: {}", e))?;
-
-    if !output.status.success() {
-        let error_msg = String::from_utf8_lossy(&output.stderr);
-        return Err(format!("openvpn3 command failed: {}", error_msg));
+impl OpenVpnClient {
+    /// Create a new OpenVPN client instance
+    pub fn new() -> Self {
+        Self
     }
 
-    let json_output = String::from_utf8_lossy(&output.stdout);
-    
-    // Parse the JSON output - it's a map where keys are D-Bus paths and values are profile data
-    let configs_map: OpenVPNConfigsMap = serde_json::from_str(&json_output)
-        .map_err(|e| format!("Failed to parse JSON: {}", e))?;
+    /// Check if OpenVPN 3 is available on the system
+    pub async fn is_available() -> bool {
+        Command::new("openvpn3")
+            .arg("version")
+            .output()
+            .await
+            .map(|output| output.status.success())
+            .unwrap_or(false)
+    }
 
-    // Convert the map to our profile list and check connection status for each
-    let profiles: Vec<OpenVPNProfile> = configs_map
-        .into_iter()
-        .map(|(path, data)| {
-            let is_active = is_profile_session_active(&data.name);
-            OpenVPNProfile {
-                name: data.name,
+    /// Get all OpenVPN profiles with their current status
+    pub async fn get_profiles(&self) -> Result<Vec<Profile>> {
+        let profiles_map = self.fetch_profiles_map().await?;
+        let sessions = self.fetch_sessions().await.unwrap_or_default();
+
+        let profiles = profiles_map
+            .into_iter()
+            .map(|(path, data)| {
+                let status = sessions
+                    .iter()
+                    .find(|s| s.profile_name == data.name)
+                    .map(|s| s.status)
+                    .unwrap_or(ConnectionStatus::Disconnected);
+
+                Profile {
+                    name: data.name,
+                    path,
+                    status,
+                    metadata: ProfileMetadata {
+                        valid: data.valid,
+                        imported: data.imported,
+                        last_used: data.last_used,
+                        use_count: data.use_count,
+                    },
+                }
+            })
+            .collect();
+
+        Ok(profiles)
+    }
+
+    /// Get a specific profile by name
+    pub async fn get_profile(&self, name: &str) -> Result<Profile> {
+        let profiles = self.get_profiles().await?;
+        profiles
+            .into_iter()
+            .find(|p| p.name == name)
+            .ok_or_else(|| Error::ProfileNotFound(name.to_string()))
+    }
+
+    /// Import a new VPN configuration file
+    pub async fn import_config(&self, path: impl AsRef<Path>, name: Option<&str>) -> Result<String> {
+        let path = path.as_ref();
+
+        // Validate file exists
+        if !path.exists() {
+            return Err(Error::InvalidInput(format!(
+                "Configuration file does not exist: {}",
+                path.display()
+            )));
+        }
+
+        // Determine profile name
+        let profile_name = name
+            .filter(|n| !n.trim().is_empty())
+            .map(|n| n.trim().to_string())
+            .or_else(|| {
+                path.file_stem()
+                    .and_then(|s| s.to_str())
+                    .map(|s| s.to_string())
+            })
+            .ok_or_else(|| Error::InvalidInput("Could not determine profile name".to_string()))?;
+
+        let output = Command::new("openvpn3")
+            .args(&[
+                "config-import",
+                "--config",
+                &path.display().to_string(),
+                "--name",
+                &profile_name,
+                "--persistent",
+            ])
+            .output()
+            .await?;
+
+        if !output.status.success() {
+            return Err(Error::CommandFailed {
+                stderr: String::from_utf8_lossy(&output.stderr).to_string(),
+                stdout: String::from_utf8_lossy(&output.stdout).to_string(),
+            });
+        }
+
+        Ok(profile_name)
+    }
+
+    /// Delete a profile by name
+    pub async fn delete_profile(&self, name: &str) -> Result<()> {
+        let output = Command::new("openvpn3")
+            .args(&["config-remove", "--config", name, "--force"])
+            .output()
+            .await?;
+
+        if !output.status.success() {
+            return Err(Error::CommandFailed {
+                stderr: String::from_utf8_lossy(&output.stderr).to_string(),
+                stdout: String::from_utf8_lossy(&output.stdout).to_string(),
+            });
+        }
+
+        Ok(())
+    }
+
+    /// Start a VPN session with authentication
+    pub async fn start_session(&self, profile_name: &str, credentials: &Credentials) -> Result<()> {
+        credentials.validate().map_err(Error::InvalidInput)?;
+
+        let mut child = Command::new("openvpn3")
+            .args(&["session-start", "--config", profile_name, "--background"])
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .spawn()?;
+
+        // Send authentication credentials
+        if let Some(mut stdin) = child.stdin.take() {
+            stdin
+                .write_all(credentials.format_for_stdin().as_bytes())
+                .await
+                .map_err(|e| Error::CommandExecution(format!("Failed to send credentials: {}", e)))?;
+            stdin.flush().await.ok();
+        }
+
+        let output = child.wait_with_output().await?;
+
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            if stderr.contains("authentication") || stderr.contains("auth") {
+                return Err(Error::AuthenticationFailed(stderr.to_string()));
+            }
+            return Err(Error::CommandFailed {
+                stderr: stderr.to_string(),
+                stdout: String::from_utf8_lossy(&output.stdout).to_string(),
+            });
+        }
+
+        Ok(())
+    }
+
+    /// Disconnect all sessions for a profile
+    pub async fn disconnect_profile(&self, profile_name: &str) -> Result<()> {
+        let sessions = self.fetch_sessions().await?;
+        let profile_sessions: Vec<_> = sessions
+            .iter()
+            .filter(|s| s.profile_name == profile_name)
+            .collect();
+
+        if profile_sessions.is_empty() {
+            return Err(Error::SessionNotFound(profile_name.to_string()));
+        }
+
+        let mut errors = Vec::new();
+        let mut success_count = 0;
+
+        for session in profile_sessions {
+            match self.disconnect_session(&session.path).await {
+                Ok(_) => success_count += 1,
+                Err(e) => errors.push(format!("{}: {}", session.path, e)),
+            }
+        }
+
+        if success_count == 0 {
+            return Err(Error::CommandFailed {
+                stderr: format!("Failed to disconnect any sessions: {}", errors.join("; ")),
+                stdout: String::new(),
+            });
+        }
+
+        if !errors.is_empty() {
+            eprintln!("Warning: Some sessions failed to disconnect: {}", errors.join("; "));
+        }
+
+        Ok(())
+    }
+
+    /// Check if a profile requires TOTP
+    pub async fn check_totp_required(&self, profile_name: &str) -> Result<bool> {
+        let output = Command::new("openvpn3")
+            .args(&["config-dump", "--config", profile_name, "--json"])
+            .output()
+            .await?;
+
+        if !output.status.success() {
+            return Ok(false); // Default to false if we can't check
+        }
+
+        let config_json = String::from_utf8_lossy(&output.stdout);
+        Ok(config_json.contains("\"static-challenge\""))
+    }
+
+    // Private helper methods
+
+    /// Fetch raw profiles map from OpenVPN
+    async fn fetch_profiles_map(&self) -> Result<ProfilesMap> {
+        let output = Command::new("openvpn3")
+            .args(&["configs-list", "--json"])
+            .output()
+            .await?;
+
+        if !output.status.success() {
+            return Err(Error::CommandFailed {
+                stderr: String::from_utf8_lossy(&output.stderr).to_string(),
+                stdout: String::from_utf8_lossy(&output.stdout).to_string(),
+            });
+        }
+
+        let json_output = String::from_utf8_lossy(&output.stdout);
+        let profiles_map: ProfilesMap = serde_json::from_str(&json_output)?;
+
+        Ok(profiles_map)
+    }
+
+    /// Fetch all active sessions
+    async fn fetch_sessions(&self) -> Result<Vec<Session>> {
+        let output = Command::new("openvpn3")
+            .args(&["sessions-list"])
+            .output()
+            .await?;
+
+        if !output.status.success() {
+            return Ok(Vec::new()); // No sessions is not an error
+        }
+
+        let sessions_text = String::from_utf8_lossy(&output.stdout);
+        Ok(parser::parse_sessions(&sessions_text))
+    }
+
+    /// Disconnect a specific session by path
+    async fn disconnect_session(&self, session_path: &str) -> Result<()> {
+        let output = Command::new("openvpn3")
+            .args(&["session-manage", "--disconnect", "--path", session_path])
+            .output()
+            .await?;
+
+        if !output.status.success() {
+            return Err(Error::CommandFailed {
+                stderr: String::from_utf8_lossy(&output.stderr).to_string(),
+                stdout: String::from_utf8_lossy(&output.stdout).to_string(),
+            });
+        }
+
+        Ok(())
+    }
+}
+
+
+/// Parser module for OpenVPN text output
+mod parser {
+    use super::*;
+
+    /// Parse sessions from sessions-list output
+    pub fn parse_sessions(output: &str) -> Vec<Session> {
+        let blocks = split_into_blocks(output);
+        blocks.into_iter().filter_map(parse_session_block).collect()
+    }
+
+    /// Split output into session blocks
+    fn split_into_blocks(output: &str) -> Vec<&str> {
+        output
+            .split("-----------------------------------------------------------------------------")
+            .filter(|block| !block.trim().is_empty())
+            .collect()
+    }
+
+    /// Parse a single session block
+    fn parse_session_block(block: &str) -> Option<Session> {
+        let mut path = None;
+        let mut profile_name = None;
+        let mut status = None;
+
+        for line in block.lines() {
+            let trimmed = line.trim();
+
+            if let Some(value) = trimmed.strip_prefix("Path:") {
+                path = Some(value.trim().to_string());
+            } else if let Some(value) = trimmed.strip_prefix("Config name:") {
+                profile_name = Some(value.trim().to_string());
+            } else if let Some(value) = trimmed.strip_prefix("Status:") {
+                status = Some(parse_status(value.trim()));
+            }
+        }
+
+        match (path, profile_name, status) {
+            (Some(path), Some(profile_name), Some(status)) => Some(Session {
                 path,
-                is_active,
-            }
-        })
-        .collect();
-
-    Ok(profiles)
-}
-
-/// Checks if a profile has an active session
-pub fn is_profile_session_active(profile_name: &str) -> bool {
-    let output = Command::new("openvpn3")
-        .args(&["sessions-list"])
-        .output();
-    
-    match output {
-        Ok(output) => {
-            if output.status.success() {
-                let sessions_output = String::from_utf8_lossy(&output.stdout);
-                // Parse text output to check session status
-                parse_session_status(&sessions_output, profile_name)
-            } else {
-                false
-            }
-        }
-        Err(_) => false,
-    }
-}
-
-/// Checks if a profile has any sessions in connecting state
-pub fn is_profile_connecting(profile_name: &str) -> bool {
-    let output = Command::new("openvpn3")
-        .args(&["sessions-list"])
-        .output();
-    
-    match output {
-        Ok(output) => {
-            if output.status.success() {
-                let sessions_output = String::from_utf8_lossy(&output.stdout);
-                // Parse text output to check for connecting states
-                parse_connecting_status(&sessions_output, profile_name)
-            } else {
-                false
-            }
-        }
-        Err(_) => false,
-    }
-}
-
-/// Parses the session status from openvpn3 sessions-list output to determine if connection is successful
-fn parse_session_status(sessions_output: &str, profile_name: &str) -> bool {
-    // Split the output into individual session blocks
-    let session_blocks: Vec<&str> = sessions_output.split("-----------------------------------------------------------------------------")
-        .filter(|block| !block.trim().is_empty())
-        .collect();
-    
-    // Check all sessions for this profile - return true if ANY session is successfully connected
-    for block in session_blocks {
-        if block.contains(&format!("Config name: {}", profile_name)) {
-            // Look for the Status line in this session block
-            for line in block.lines() {
-                if line.trim().starts_with("Status:") {
-                    let status = line.trim().strip_prefix("Status:").unwrap_or("").trim();
-                    // Check if the status indicates a successful connection
-                    // Look for positive indicators and exclude failure indicators
-                    let is_successful = status.contains("Client connected") ||
-                                       (status.contains("Connected") && !status.contains("failed")) ||
-                                       status.contains("Ready") ||
-                                       (status.contains("Connection") && 
-                                        status.contains("Client connected"));
-                    
-                    // If we find ANY successful session for this profile, return true
-                    if is_successful {
-                        return true;
-                    }
-                }
-            }
+                profile_name,
+                status,
+            }),
+            _ => None,
         }
     }
-    
-    false
-}
 
-/// Parses the session status to detect connecting states
-fn parse_connecting_status(sessions_output: &str, profile_name: &str) -> bool {
-    // Split the output into individual session blocks
-    let session_blocks: Vec<&str> = sessions_output.split("-----------------------------------------------------------------------------")
-        .filter(|block| !block.trim().is_empty())
-        .collect();
-    
-    // Check all sessions for this profile - return true if ANY session is connecting
-    for block in session_blocks {
-        if block.contains(&format!("Config name: {}", profile_name)) {
-            // Look for the Status line in this session block
-            for line in block.lines() {
-                if line.trim().starts_with("Status:") {
-                    let status = line.trim().strip_prefix("Status:").unwrap_or("").trim();
-                    // Check if the status indicates a connecting state
-                    let is_connecting = status.contains("Connecting") ||
-                                      status.contains("Resolving") ||
-                                      status.contains("Authenticating") ||
-                                      status.contains("Negotiating") ||
-                                      (status.contains("Connection") && 
-                                       !status.contains("Client connected") && 
-                                       !status.contains("failed") &&
-                                       !status.contains("Authentication failed"));
-                    
-                    // If we find ANY connecting session for this profile, return true
-                    if is_connecting {
-                        return true;
-                    }
-                }
-            }
-        }
-    }
-    
-    false
-}
+    /// Parse status string into ConnectionStatus
+    fn parse_status(status: &str) -> ConnectionStatus {
+        let lower = status.to_lowercase();
 
-/// Disconnects all active OpenVPN 3 sessions for a profile by name
-pub fn disconnect_openvpn_session(profile_name: &str) -> Result<(), String> {
-    // First, get all session paths for this profile
-    let session_paths = get_session_paths_for_profile(profile_name)?;
-    
-    if session_paths.is_empty() {
-        return Err(format!("No active sessions found for profile '{}'", profile_name));
-    }
-    
-    // Disconnect each session individually
-    let mut disconnected_count = 0;
-    let mut errors = Vec::new();
-    
-    for session_path in session_paths {
-        match disconnect_session_by_path(&session_path) {
-            Ok(_) => {
-                disconnected_count += 1;
-                eprintln!("Disconnected session: {}", session_path);
-            }
-            Err(error) => {
-                errors.push(format!("Failed to disconnect session {}: {}", session_path, error));
-            }
-        }
-    }
-    
-    if disconnected_count == 0 {
-        return Err(format!("Failed to disconnect any sessions for profile '{}': {}", 
-                          profile_name, errors.join("; ")));
-    }
-    
-    if !errors.is_empty() {
-        eprintln!("Warning: Some sessions failed to disconnect: {}", errors.join("; "));
-    }
-    
-    Ok(())
-}
-
-/// Gets all session paths for a specific profile
-fn get_session_paths_for_profile(profile_name: &str) -> Result<Vec<String>, String> {
-    let output = Command::new("openvpn3")
-        .args(&["sessions-list"])
-        .output()
-        .map_err(|e| format!("Failed to execute openvpn3 sessions-list command: {}", e))?;
-
-    if !output.status.success() {
-        let error_msg = String::from_utf8_lossy(&output.stderr);
-        return Err(format!("Failed to list sessions: {}", error_msg));
-    }
-
-    let sessions_output = String::from_utf8_lossy(&output.stdout);
-    parse_session_paths(&sessions_output, profile_name)
-}
-
-/// Parses session paths from sessions-list output for a specific profile
-fn parse_session_paths(sessions_output: &str, profile_name: &str) -> Result<Vec<String>, String> {
-    let mut session_paths = Vec::new();
-    
-    // Split the output into individual session blocks
-    let session_blocks: Vec<&str> = sessions_output.split("-----------------------------------------------------------------------------")
-        .filter(|block| !block.trim().is_empty())
-        .collect();
-    
-    for block in session_blocks {
-        if block.contains(&format!("Config name: {}", profile_name)) {
-            // Look for the Path line in this session block
-            for line in block.lines() {
-                if line.trim().starts_with("Path:") {
-                    let path = line.trim().strip_prefix("Path:").unwrap_or("").trim();
-                    if !path.is_empty() {
-                        session_paths.push(path.to_string());
-                    }
-                    break;
-                }
-            }
-        }
-    }
-    
-    Ok(session_paths)
-}
-
-/// Disconnects a specific session by its path
-fn disconnect_session_by_path(session_path: &str) -> Result<(), String> {
-    let output = Command::new("openvpn3")
-        .args(&["session-manage", "--disconnect", "--path", session_path])
-        .output()
-        .map_err(|e| format!("Failed to execute openvpn3 session-manage command: {}", e))?;
-
-    if !output.status.success() {
-        let error_msg = String::from_utf8_lossy(&output.stderr);
-        return Err(format!("Failed to disconnect session at path '{}': {}", session_path, error_msg));
-    }
-
-    Ok(())
-}
-
-/// Deletes an OpenVPN 3 profile by name
-pub fn delete_openvpn_profile(profile_name: &str) -> Result<(), String> {
-    let output = Command::new("openvpn3")
-        .args(&["config-remove", "--config", profile_name, "--force"])
-        .output()
-        .map_err(|e| format!("Failed to execute openvpn3 config-remove command: {}", e))?;
-
-    if !output.status.success() {
-        let error_msg = String::from_utf8_lossy(&output.stderr);
-        return Err(format!("Failed to delete profile '{}': {}", profile_name, error_msg));
-    }
-
-    Ok(())
-}
-
-/// Imports an OpenVPN configuration file
-pub fn import_openvpn_config(config_path: &str, custom_name: Option<&str>) -> Result<String, String> {
-    // Use custom name if provided and not empty/whitespace, otherwise fall back to filename
-    let profile_name = if let Some(name) = custom_name {
-        let trimmed = name.trim();
-        if trimmed.is_empty() {
-            // Fall back to filename if custom name is empty/whitespace
-            std::path::Path::new(config_path)
-                .file_stem()
-                .and_then(|s| s.to_str())
-                .unwrap_or("unknown")
-                .to_string()
+        if lower.contains("client connected") {
+            ConnectionStatus::Connected
+        } else if lower.contains("connected") && !lower.contains("failed") {
+            ConnectionStatus::Connected
+        } else if lower.contains("ready") {
+            ConnectionStatus::Connected
+        } else if lower.contains("connecting")
+            || lower.contains("resolving")
+            || lower.contains("authenticating")
+            || lower.contains("negotiating")
+        {
+            ConnectionStatus::Connecting
+        } else if lower.contains("failed") || lower.contains("authentication failed") {
+            ConnectionStatus::Failed
         } else {
-            trimmed.to_string()
+            ConnectionStatus::Disconnected
         }
-    } else {
-        // No custom name provided, use filename
-        std::path::Path::new(config_path)
-            .file_stem()
-            .and_then(|s| s.to_str())
-            .unwrap_or("unknown")
-            .to_string()
-    };
-
-    let output = Command::new("openvpn3")
-        .args(&["config-import", "--config", config_path, "--name", &profile_name, "--persistent"])
-        .output()
-        .map_err(|e| format!("Failed to execute openvpn3 config-import command: {}", e))?;
-
-    if !output.status.success() {
-        let error_msg = String::from_utf8_lossy(&output.stderr);
-        return Err(format!("Failed to import config '{}': {}", config_path, error_msg));
-    }
-
-    Ok(profile_name)
-}
-
-/// Starts an OpenVPN session with authentication
-pub fn start_openvpn_session(profile_name: &str, username: &str, password: &str, totp: Option<&str>) -> Result<String, String> {
-    let args = vec!["session-start", "--config", profile_name, "--background"];
-    
-    // Set up input for authentication
-    let auth_input = if let Some(totp_code) = totp {
-        format!("{}\n{}\n{}\n", username, password, totp_code)
-    } else {
-        format!("{}\n{}\n", username, password)
-    };
-    
-    let mut child = Command::new("openvpn3")
-        .args(&args)
-        .stdin(std::process::Stdio::piped())
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped())
-        .spawn()
-        .map_err(|e| format!("Failed to start openvpn3 session-start command: {}", e))?;
-    
-    // Send authentication credentials
-    if let Some(mut stdin) = child.stdin.take() {
-        use std::io::Write;
-        stdin.write_all(auth_input.as_bytes())
-            .map_err(|e| format!("Failed to send authentication: {}", e))?;
-    }
-    
-    let result = child.wait_with_output()
-        .map_err(|e| format!("Failed to wait for openvpn3 session-start: {}", e))?;
-    
-    if !result.status.success() {
-        let error_msg = String::from_utf8_lossy(&result.stderr);
-        return Err(format!("Failed to start session for profile '{}': {}", profile_name, error_msg));
-    }
-    
-    Ok(format!("Session started for profile '{}'", profile_name))
-}
-
-/// Checks if OpenVPN 3 is available on the system
-pub fn is_openvpn3_available() -> bool {
-    Command::new("openvpn3")
-        .arg("version")
-        .output()
-        .map(|output| output.status.success())
-        .unwrap_or(false)
-}
-
-/// Checks if a profile requires TOTP authentication based on its configuration
-pub fn profile_requires_totp(profile_name: &str) -> bool {
-    let output = Command::new("openvpn3")
-        .args(&["config-dump", "--config", profile_name, "--json"])
-        .output();
-    
-    match output {
-        Ok(output) => {
-            if output.status.success() {
-                let config_json = String::from_utf8_lossy(&output.stdout);
-                parse_totp_requirement(&config_json)
-            } else {
-                false
-            }
-        }
-        Err(_) => false,
     }
 }
 
-/// Parses the configuration JSON to determine if TOTP is required
-fn parse_totp_requirement(config_json: &str) -> bool {
-    // Look for static-challenge field in the configuration
-    // If present, it indicates TOTP is required
-    config_json.contains("\"static-challenge\"")
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_credentials_validation() {
+        let valid = Credentials::new("user", "pass");
+        assert!(valid.validate().is_ok());
+
+        let empty_user = Credentials::new("", "pass");
+        assert!(empty_user.validate().is_err());
+
+        let empty_pass = Credentials::new("user", "");
+        assert!(empty_pass.validate().is_err());
+    }
+
+    #[test]
+    fn test_credentials_format() {
+        let basic = Credentials::new("user", "pass");
+        assert_eq!(basic.format_for_stdin(), "user\npass\n");
+
+        let with_totp = Credentials::new("user", "pass").with_totp("123456");
+        assert_eq!(with_totp.format_for_stdin(), "user\npass\n123456\n");
+    }
+
+    #[test]
+    fn test_connection_status() {
+        assert!(ConnectionStatus::Connected.is_active());
+        assert!(ConnectionStatus::Connecting.is_active());
+        assert!(!ConnectionStatus::Disconnected.is_active());
+        assert!(!ConnectionStatus::Failed.is_active());
+
+        assert!(ConnectionStatus::Connecting.is_connecting());
+        assert!(!ConnectionStatus::Connected.is_connecting());
+    }
 }

@@ -77,6 +77,14 @@ install:
     install -Dm0644 "res/icons/logo_dark.svg" "{{icons-dst}}/32x32/apps/logo_dark.svg"
     install -Dm0644 "res/icons/logo_dark.svg" "{{icons-dst}}/24x24/apps/logo_dark.svg"
     install -Dm0644 "res/icons/logo_dark.svg" "{{icons-dst}}/16x16/apps/logo_dark.svg"
+    # Install custom logo_dark_outline.svg icon
+    install -Dm0644 "res/icons/logo_dark_outline.svg" "{{icons-dst}}/256x256/apps/logo_dark_outline.svg"
+    install -Dm0644 "res/icons/logo_dark_outline.svg" "{{icons-dst}}/128x128/apps/logo_dark_outline.svg"
+    install -Dm0644 "res/icons/logo_dark_outline.svg" "{{icons-dst}}/64x64/apps/logo_dark_outline.svg"
+    install -Dm0644 "res/icons/logo_dark_outline.svg" "{{icons-dst}}/48x48/apps/logo_dark_outline.svg"
+    install -Dm0644 "res/icons/logo_dark_outline.svg" "{{icons-dst}}/32x32/apps/logo_dark_outline.svg"
+    install -Dm0644 "res/icons/logo_dark_outline.svg" "{{icons-dst}}/24x24/apps/logo_dark_outline.svg"
+    install -Dm0644 "res/icons/logo_dark_outline.svg" "{{icons-dst}}/16x16/apps/logo_dark_outline.svg"
 
 # Installs files
 flatpak:
@@ -91,6 +99,14 @@ flatpak:
     install -Dm0644 "res/icons/logo_dark.svg" "{{icons-dst}}/32x32/apps/logo_dark.svg"
     install -Dm0644 "res/icons/logo_dark.svg" "{{icons-dst}}/24x24/apps/logo_dark.svg"
     install -Dm0644 "res/icons/logo_dark.svg" "{{icons-dst}}/16x16/apps/logo_dark.svg"
+    # Install custom logo_dark_outline.svg icon
+    install -Dm0644 "res/icons/logo_dark_outline.svg" "{{icons-dst}}/256x256/apps/logo_dark_outline.svg"
+    install -Dm0644 "res/icons/logo_dark_outline.svg" "{{icons-dst}}/128x128/apps/logo_dark_outline.svg"
+    install -Dm0644 "res/icons/logo_dark_outline.svg" "{{icons-dst}}/64x64/apps/logo_dark_outline.svg"
+    install -Dm0644 "res/icons/logo_dark_outline.svg" "{{icons-dst}}/48x48/apps/logo_dark_outline.svg"
+    install -Dm0644 "res/icons/logo_dark_outline.svg" "{{icons-dst}}/32x32/apps/logo_dark_outline.svg"
+    install -Dm0644 "res/icons/logo_dark_outline.svg" "{{icons-dst}}/24x24/apps/logo_dark_outline.svg"
+    install -Dm0644 "res/icons/logo_dark_outline.svg" "{{icons-dst}}/16x16/apps/logo_dark_outline.svg"
 
 # Uninstalls installed files
 uninstall:
