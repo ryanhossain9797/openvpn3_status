@@ -21,23 +21,31 @@ pub struct OpenVpn3Status {
 }
 
 /// Application state container
-#[derive(Default)]
-struct AppState {
-    profiles: Vec<Profile>,
-    openvpn_available: bool,
-    dialog: DialogState,
+enum AppState {
+    /// OpenVPN is not available on the system
+    Unavailable,
+    /// OpenVPN is available
+    Available {
+        profiles: Vec<Profile>,
+        dialog: DialogState,
+    },
+}
+
+impl Default for AppState {
+    fn default() -> Self {
+        Self::Unavailable
+    }
 }
 
 /// Dialog state management
 #[derive(Default)]
 enum DialogState {
     #[default]
-    None,
+    Default,
     Import(ImportDialog),
     Connect(ConnectDialog),
 }
 
-/// Import dialog state
 struct ImportDialog {
     id: Id,
     file_path: String,
@@ -54,7 +62,6 @@ impl ImportDialog {
     }
 }
 
-/// Connect dialog state
 struct ConnectDialog {
     id: Id,
     profile_name: String,
@@ -152,11 +159,8 @@ impl Application for OpenVpn3Status {
 
         // Initialize async
         let task = Task::perform(
-            async {
-                let available = OpenVpnClient::is_available().await;
-                (available, available)
-            },
-            |(available, should_load)| {
+            OpenVpnClient::is_available(),
+            |should_load| {
                 if should_load {
                     cosmic::Action::App(Message::RefreshProfiles)
                 } else {
@@ -173,10 +177,11 @@ impl Application for OpenVpn3Status {
     }
 
     fn view(&self) -> Element<'_, Self::Message> {
-        let icon = if self.state.profiles.iter().any(|p| p.is_active()) {
-            "logo_dark"
-        } else {
-            "logo_dark_outline"
+        let icon = match &self.state {
+            AppState::Available { profiles, .. } if profiles.iter().any(|p| p.is_active()) => {
+                "logo_dark"
+            }
+            _ => "logo_dark_outline",
         };
 
         self.core
@@ -187,10 +192,13 @@ impl Application for OpenVpn3Status {
     }
 
     fn view_window(&self, _id: Id) -> Element<'_, Self::Message> {
-        match &self.state.dialog {
-            DialogState::Import(dialog) => self.view_import_dialog(dialog),
-            DialogState::Connect(dialog) => self.view_connect_dialog(dialog),
-            DialogState::None => self.view_main_content(),
+        match &self.state {
+            AppState::Unavailable => self.view_unavailable(),
+            AppState::Available { dialog, .. } => match dialog {
+                DialogState::Import(dialog) => self.view_import_dialog(dialog),
+                DialogState::Connect(dialog) => self.view_connect_dialog(dialog),
+                DialogState::Default => self.view_main_content(),
+            },
         }
     }
 
@@ -247,13 +255,21 @@ impl Application for OpenVpn3Status {
 
 // View methods
 impl OpenVpn3Status {
-    fn view_main_content(&self) -> Element<'_, Message> {
-        let mut content = widget::column().spacing(10).padding(20);
+    fn view_unavailable(&self) -> Element<'_, Message> {
+        let content = widget::column()
+            .spacing(10)
+            .padding(20)
+            .push(widget::text("OpenVPN 3 not available").size(16));
 
-        if !self.state.openvpn_available {
-            content = content.push(widget::text("OpenVPN 3 not available").size(16));
-            return self.core.applet.popup_container(content).into();
-        }
+        self.core.applet.popup_container(content).into()
+    }
+
+    fn view_main_content(&self) -> Element<'_, Message> {
+        let AppState::Available { profiles, .. } = &self.state else {
+            return self.view_unavailable();
+        };
+
+        let mut content = widget::column().spacing(10).padding(20);
 
         // Header
         content = content.push(widget::text("OpenVPN 3 Profiles").size(18));
@@ -269,10 +285,10 @@ impl OpenVpn3Status {
         content = content.push(widget::horizontal_space());
 
         // Profiles list
-        if self.state.profiles.is_empty() {
+        if profiles.is_empty() {
             content = content.push(widget::text("No profiles found"));
         } else {
-            for profile in &self.state.profiles {
+            for profile in profiles {
                 content = content.push(self.view_profile_row(profile));
             }
         }
@@ -378,15 +394,30 @@ impl OpenVpn3Status {
 
 // Message handlers
 impl OpenVpn3Status {
+    /// Helper to get mutable reference to dialog if available
+    fn dialog_mut(&mut self) -> Option<&mut DialogState> {
+        match &mut self.state {
+            AppState::Available { dialog, .. } => Some(dialog),
+            AppState::Unavailable => None,
+        }
+    }
+
+    /// Helper to get reference to dialog if available
+    fn dialog(&self) -> Option<&DialogState> {
+        match &self.state {
+            AppState::Available { dialog, .. } => Some(dialog),
+            AppState::Unavailable => None,
+        }
+    }
+
     fn handle_toggle_popup(&mut self) -> Task<Message> {
         if let Some(p) = self.popup.take() {
             destroy_popup(p)
         } else {
             // Refresh when opening
-            let refresh_task = if self.state.openvpn_available {
-                self.handle_refresh_profiles()
-            } else {
-                Task::none()
+            let refresh_task = match &self.state {
+                AppState::Available { .. } => self.handle_refresh_profiles(),
+                AppState::Unavailable => Task::none(),
             };
 
             let new_id = Id::unique();
@@ -431,9 +462,12 @@ impl OpenVpn3Status {
     fn handle_profiles_loaded(&mut self, result: Result<Vec<Profile>, String>) -> Task<Message> {
         match result {
             Ok(profiles) => {
-                self.state.openvpn_available = true;
                 let has_connecting = profiles.iter().any(|p| p.is_connecting());
-                self.state.profiles = profiles;
+
+                self.state = AppState::Available {
+                    profiles,
+                    dialog: DialogState::Default,
+                };
 
                 if has_connecting {
                     Task::perform(
@@ -458,7 +492,7 @@ impl OpenVpn3Status {
 
     fn handle_delete_profile(&mut self, name: String) -> Task<Message> {
         // Don't allow if dialog is open
-        if !matches!(self.state.dialog, DialogState::None) {
+        if !matches!(self.dialog(), Some(DialogState::Default)) {
             eprintln!("Cannot delete profile while dialog is open");
             return Task::none();
         }
@@ -476,7 +510,9 @@ impl OpenVpn3Status {
     fn handle_profile_deleted(&mut self, name: String, result: Result<(), String>) -> Task<Message> {
         match result {
             Ok(_) => {
-                self.state.profiles.retain(|p| p.name != name);
+                if let AppState::Available { profiles, .. } = &mut self.state {
+                    profiles.retain(|p| p.name != name);
+                }
                 Task::none()
             }
             Err(e) => {
@@ -488,7 +524,7 @@ impl OpenVpn3Status {
 
     fn handle_disconnect_session(&mut self, name: String) -> Task<Message> {
         // Don't allow if dialog is open
-        if !matches!(self.state.dialog, DialogState::None) {
+        if !matches!(self.dialog(), Some(DialogState::Default)) {
             eprintln!("Cannot disconnect session while dialog is open");
             return Task::none();
         }
@@ -521,40 +557,46 @@ impl OpenVpn3Status {
     }
 
     fn handle_open_import_dialog(&mut self) -> Task<Message> {
-        // Don't open if another dialog is open
-        if !matches!(self.state.dialog, DialogState::None) {
+        // Don't open if another dialog is open or OpenVPN unavailable
+        let Some(dialog) = self.dialog_mut() else {
+            return Task::none();
+        };
+
+        if !matches!(dialog, DialogState::Default) {
             return Task::none();
         }
 
         let id = Id::unique();
-        self.state.dialog = DialogState::Import(ImportDialog::new(id));
+        *dialog = DialogState::Import(ImportDialog::new(id));
         Task::none()
     }
 
     fn handle_close_import_dialog(&mut self, id: Id) -> Task<Message> {
-        if let DialogState::Import(dialog) = &self.state.dialog {
+        if let Some(DialogState::Import(dialog)) = self.dialog() {
             if dialog.id == id {
-                self.state.dialog = DialogState::None;
+                if let Some(d) = self.dialog_mut() {
+                    *d = DialogState::Default;
+                }
             }
         }
         Task::none()
     }
 
     fn handle_import_file_path_changed(&mut self, path: String) {
-        if let DialogState::Import(dialog) = &mut self.state.dialog {
+        if let Some(DialogState::Import(dialog)) = self.dialog_mut() {
             dialog.file_path = path;
         }
     }
 
     fn handle_import_custom_name_changed(&mut self, name: String) {
-        if let DialogState::Import(dialog) = &mut self.state.dialog {
+        if let Some(DialogState::Import(dialog)) = self.dialog_mut() {
             dialog.custom_name = name;
         }
     }
 
     fn handle_submit_import(&mut self) -> Task<Message> {
-        let (file_path, custom_name) = match &self.state.dialog {
-            DialogState::Import(dialog) => {
+        let (file_path, custom_name) = match self.dialog() {
+            Some(DialogState::Import(dialog)) => {
                 if dialog.file_path.trim().is_empty() {
                     return Task::none();
                 }
@@ -568,7 +610,9 @@ impl OpenVpn3Status {
             _ => return Task::none(),
         };
 
-        self.state.dialog = DialogState::None;
+        if let Some(dialog) = self.dialog_mut() {
+            *dialog = DialogState::Default;
+        }
 
         let client = self.client.clone();
         Task::perform(
@@ -596,8 +640,12 @@ impl OpenVpn3Status {
     }
 
     fn handle_open_connect_dialog(&mut self, profile_name: String, requires_totp: bool) -> Task<Message> {
-        // Don't open if another dialog is open
-        if !matches!(self.state.dialog, DialogState::None) {
+        // Don't open if another dialog is open or OpenVPN unavailable
+        let Some(dialog) = self.dialog_mut() else {
+            return Task::none();
+        };
+
+        if !matches!(dialog, DialogState::Default) {
             return Task::none();
         }
 
@@ -620,40 +668,42 @@ impl OpenVpn3Status {
 
         // Open the dialog directly
         let id = Id::unique();
-        self.state.dialog = DialogState::Connect(ConnectDialog::new(id, profile_name, requires_totp));
+        *dialog = DialogState::Connect(ConnectDialog::new(id, profile_name, requires_totp));
         Task::none()
     }
 
     fn handle_close_connect_dialog(&mut self, id: Id) -> Task<Message> {
-        if let DialogState::Connect(dialog) = &self.state.dialog {
+        if let Some(DialogState::Connect(dialog)) = self.dialog() {
             if dialog.id == id {
-                self.state.dialog = DialogState::None;
+                if let Some(d) = self.dialog_mut() {
+                    *d = DialogState::Default;
+                }
             }
         }
         Task::none()
     }
 
     fn handle_connect_username_changed(&mut self, username: String) {
-        if let DialogState::Connect(dialog) = &mut self.state.dialog {
+        if let Some(DialogState::Connect(dialog)) = self.dialog_mut() {
             dialog.username = username;
         }
     }
 
     fn handle_connect_password_changed(&mut self, password: String) {
-        if let DialogState::Connect(dialog) = &mut self.state.dialog {
+        if let Some(DialogState::Connect(dialog)) = self.dialog_mut() {
             dialog.password = password;
         }
     }
 
     fn handle_connect_totp_changed(&mut self, totp: String) {
-        if let DialogState::Connect(dialog) = &mut self.state.dialog {
+        if let Some(DialogState::Connect(dialog)) = self.dialog_mut() {
             dialog.totp = totp;
         }
     }
 
     fn handle_submit_connect(&mut self) -> Task<Message> {
-        let (profile_name, credentials) = match &self.state.dialog {
-            DialogState::Connect(dialog) => {
+        let (profile_name, credentials) = match self.dialog() {
+            Some(DialogState::Connect(dialog)) => {
                 if !dialog.is_valid() {
                     eprintln!("Please fill in all required fields");
                     return Task::none();
@@ -663,7 +713,9 @@ impl OpenVpn3Status {
             _ => return Task::none(),
         };
 
-        self.state.dialog = DialogState::None;
+        if let Some(dialog) = self.dialog_mut() {
+            *dialog = DialogState::Default;
+        }
 
         let client = self.client.clone();
         Task::perform(
