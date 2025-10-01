@@ -1,5 +1,5 @@
 name := 'cosmic-openvpn3-status'
-export APPID := 'com.system76.OpenVPN3Status'
+export APPID := 'io.github.ryanhossain9797.OpenVPN3Status'
 
 rootdir := ''
 prefix := '/usr'

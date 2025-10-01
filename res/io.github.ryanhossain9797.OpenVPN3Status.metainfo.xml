@@ -1,6 +1,6 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <component type="desktop-application">
-  <id>com.system76.OpenVPN3Status</id>
+  <id>io.github.ryanhossain9797.OpenVPN3Status</id>
   <metadata_license>CC0-1.0</metadata_license>
   <project_license>GPL-3.0-only</project_license>
   <project_group>COSMIC</project_group>
@@ -19,8 +19,8 @@
       <li>Real-time session status updates</li>
     </ul>
   </description>
-  <launchable type="desktop-id">com.system76.OpenVPN3Status.desktop</launchable>
-  <icon type="remote" height="256" width="256">https://raw.githubusercontent.com/pop-os/cosmic-openvpn3-status/master/res/icons/hicolor/256x256/apps/com.system76.OpenVPN3Status.svg</icon>
+  <launchable type="desktop-id">io.github.ryanhossain9797.OpenVPN3Status.desktop</launchable>
+  <icon type="remote" height="256" width="256">https://raw.githubusercontent.com/ryanhossain9797/openvpn3_status/main/res/icons/hicolor/256x256/apps/io.github.ryanhossain9797.OpenVPN3Status.svg</icon>
   <screenshots>
   </screenshots>
   <provides>

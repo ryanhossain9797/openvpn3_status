@@ -138,7 +138,7 @@ impl Application for OpenVpn3Status {
     type Executor = cosmic::executor::Default;
     type Flags = ();
     type Message = Message;
-    const APP_ID: &'static str = "com.system76.OpenVPN3Status";
+    const APP_ID: &'static str = "io.github.ryanhossain9797.OpenVPN3Status";
 
     fn core(&self) -> &Core {
         &self.core
