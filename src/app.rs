@@ -12,12 +12,22 @@ use crate::core::{Credentials, OpenVpnClient, Profile};
 const AUTO_REFRESH_INTERVAL_SECS: u64 = 3;
 
 /// Main application state
-#[derive(Default)]
 pub struct OpenVpn3Status {
     core: Core,
     popup: Option<Id>,
-    client: OpenVpnClient,
+    client: Option<OpenVpnClient>,
     state: AppState,
+}
+
+impl Default for OpenVpn3Status {
+    fn default() -> Self {
+        Self {
+            core: Core::default(),
+            popup: None,
+            client: None,
+            state: AppState::default(),
+        }
+    }
 }
 
 /// Application state container
@@ -94,7 +104,7 @@ impl ConnectDialog {
     fn is_valid(&self) -> bool {
         !self.username.trim().is_empty()
             && !self.password.trim().is_empty()
-            && (!self.requires_totp || !self.totp.trim().is_empty())
+            // TOTP is now optional - can be left empty if not needed
     }
 }
 
@@ -104,6 +114,9 @@ pub enum Message {
     // Window management
     TogglePopup,
     PopupClosed(Id),
+
+    // Client initialization
+    ClientInitialized(Option<OpenVpnClient>),
 
     // Profile operations
     RefreshProfiles,
@@ -149,24 +162,27 @@ impl Application for OpenVpn3Status {
     }
 
     fn init(core: Core, _flags: Self::Flags) -> (Self, Task<Self::Message>) {
-        let client = OpenVpnClient::new();
         let app = Self {
             core,
             popup: None,
-            client,
+            client: None,
             state: AppState::default(),
         };
 
         // Initialize async
         let task = Task::perform(
-            OpenVpnClient::is_available(),
-            |should_load| {
-                if should_load {
-                    cosmic::Action::App(Message::RefreshProfiles)
+            async {
+                let is_available = OpenVpnClient::is_available().await;
+                if is_available {
+                    match OpenVpnClient::new().await {
+                        Ok(client) => Some(client),
+                        Err(_) => None,
+                    }
                 } else {
-                    cosmic::Action::App(Message::ProfilesLoaded(Ok(Vec::new())))
+                    None
                 }
             },
+            |client| cosmic::Action::App(Message::ClientInitialized(client)),
         );
 
         (app, task)
@@ -206,6 +222,7 @@ impl Application for OpenVpn3Status {
         match message {
             Message::TogglePopup => self.handle_toggle_popup(),
             Message::PopupClosed(id) => self.handle_popup_closed(id),
+            Message::ClientInitialized(client) => self.handle_client_initialized(client),
             Message::RefreshProfiles => self.handle_refresh_profiles(),
             Message::ProfilesLoaded(result) => self.handle_profiles_loaded(result),
             Message::DeleteProfile(name) => self.handle_delete_profile(name),
@@ -275,8 +292,8 @@ impl OpenVpn3Status {
         content = content.push(widget::text("OpenVPN 3 Profiles").size(18));
 
         // Action buttons
-        let refresh_button = widget::button::text("Refresh").on_press(Message::RefreshProfiles);
-        let import_button = widget::button::text("Import Config").on_press(Message::OpenImportDialog);
+        let refresh_button = widget::button::standard("Refresh").on_press(Message::RefreshProfiles);
+        let import_button = widget::button::standard("Import Config").on_press(Message::OpenImportDialog);
         let button_row = widget::row()
             .push(refresh_button)
             .push(import_button)
@@ -300,21 +317,21 @@ impl OpenVpn3Status {
         let name_text = widget::text(&profile.name).width(cosmic::iced::Length::Fill);
 
         let row = if profile.is_active() {
-            let disconnect_btn = widget::button::text("Disconnect")
+            let disconnect_btn = widget::button::destructive("Disconnect")
                 .on_press(Message::DisconnectSession(profile.name.clone()));
             widget::row()
                 .push(name_text)
                 .push(disconnect_btn)
                 .spacing(10)
         } else {
-            let connect_btn = widget::button::text("Connect").on_press(
+            let connect_btn = widget::button::suggested("Connect").on_press(
                 Message::OpenConnectDialog {
                     profile_name: profile.name.clone(),
                     requires_totp: false, // Will be determined when dialog opens
                 }
             );
             let delete_btn =
-                widget::button::text("Delete").on_press(Message::DeleteProfile(profile.name.clone()));
+                widget::button::destructive("Delete").on_press(Message::DeleteProfile(profile.name.clone()));
             widget::row()
                 .push(name_text)
                 .push(connect_btn)
@@ -332,9 +349,9 @@ impl OpenVpn3Status {
         let custom_name_input = widget::text_input("Custom name (optional)", &dialog.custom_name)
             .on_input(Message::ImportCustomNameChanged);
 
-        let submit_button = widget::button::text("Import").on_press(Message::SubmitImport);
+        let submit_button = widget::button::suggested("Import").on_press(Message::SubmitImport);
         let cancel_button =
-            widget::button::text("Cancel").on_press(Message::CloseImportDialog(dialog.id));
+            widget::button::standard("Cancel").on_press(Message::CloseImportDialog(dialog.id));
 
         let button_row = widget::row()
             .push(submit_button)
@@ -367,16 +384,15 @@ impl OpenVpn3Status {
                     .on_input(Message::ConnectPasswordChanged),
             );
 
-        if dialog.requires_totp {
-            content = content.push(
-                widget::text_input("TOTP Code (required)", &dialog.totp)
-                    .on_input(Message::ConnectTotpChanged),
-            );
-        }
+        // Always show TOTP field, but make it optional
+        content = content.push(
+            widget::text_input("TOTP Code (optional)", &dialog.totp)
+                .on_input(Message::ConnectTotpChanged),
+        );
 
-        let connect_button = widget::button::text("Connect").on_press(Message::SubmitConnect);
+        let connect_button = widget::button::suggested("Connect").on_press(Message::SubmitConnect);
         let cancel_button =
-            widget::button::text("Cancel").on_press(Message::CloseConnectDialog(dialog.id));
+            widget::button::standard("Cancel").on_press(Message::CloseConnectDialog(dialog.id));
 
         let button_row = widget::row()
             .push(connect_button)
@@ -385,8 +401,8 @@ impl OpenVpn3Status {
 
         content = content.push(button_row).spacing(10).padding(20);
 
-        let height = if dialog.requires_totp { 280 } else { 250 };
-        let container = widget::container(content).width(400).height(height);
+        // Always use the taller height since we always show TOTP field now
+        let container = widget::container(content).width(400).height(280);
 
         self.core.applet.popup_container(container).into()
     }
@@ -446,14 +462,23 @@ impl OpenVpn3Status {
         Task::none()
     }
 
+    fn handle_client_initialized(&mut self, client: Option<OpenVpnClient>) -> Task<Message> {
+        self.client = client;
+        if self.client.is_some() {
+            self.handle_refresh_profiles()
+        } else {
+            Task::none()
+        }
+    }
+
     fn handle_refresh_profiles(&mut self) -> Task<Message> {
         let client = self.client.clone();
         Task::perform(
             async move {
-                client
-                    .get_profiles()
-                    .await
-                    .map_err(|e| e.to_string())
+                match client {
+                    Some(client) => client.get_profiles().await.map_err(|e| e.to_string()),
+                    None => Ok(Vec::new()),
+                }
             },
             |result| cosmic::Action::App(Message::ProfilesLoaded(result)),
         )
@@ -500,7 +525,10 @@ impl OpenVpn3Status {
         let client = self.client.clone();
         Task::perform(
             async move {
-                let result = client.delete_profile(&name).await.map_err(|e| e.to_string());
+                let result = match client {
+                    Some(client) => client.delete_profile(&name).await.map_err(|e| e.to_string()),
+                    None => Err("OpenVPN client not available".to_string()),
+                };
                 (name, result)
             },
             |(name, result)| cosmic::Action::App(Message::ProfileDeleted(name, result)),
@@ -532,7 +560,10 @@ impl OpenVpn3Status {
         let client = self.client.clone();
         Task::perform(
             async move {
-                let result = client.disconnect_profile(&name).await.map_err(|e| e.to_string());
+                let result = match client {
+                    Some(client) => client.disconnect_profile(&name).await.map_err(|e| e.to_string()),
+                    None => Err("OpenVPN client not available".to_string()),
+                };
                 (name, result)
             },
             |(name, result)| cosmic::Action::App(Message::SessionDisconnected(name, result)),
@@ -617,10 +648,10 @@ impl OpenVpn3Status {
         let client = self.client.clone();
         Task::perform(
             async move {
-                client
-                    .import_config(&file_path, custom_name.as_deref())
-                    .await
-                    .map_err(|e| e.to_string())
+                match client {
+                    Some(client) => client.import_config(&file_path, custom_name.as_deref()).await.map_err(|e| e.to_string()),
+                    None => Err("OpenVPN client not available".to_string()),
+                }
             },
             |result| cosmic::Action::App(Message::ConfigImported(result)),
         )
@@ -642,33 +673,20 @@ impl OpenVpn3Status {
     fn handle_open_connect_dialog(&mut self, profile_name: String, requires_totp: bool) -> Task<Message> {
         // Don't open if another dialog is open or OpenVPN unavailable
         let Some(dialog) = self.dialog_mut() else {
+            eprintln!("Cannot open connect dialog: dialog state unavailable");
             return Task::none();
         };
 
         if !matches!(dialog, DialogState::Default) {
+            eprintln!("Cannot open connect dialog: another dialog is already open");
             return Task::none();
         }
 
-        // If requires_totp is false, we need to check; otherwise just open the dialog
-        if !requires_totp {
-            let client = self.client.clone();
-            let name = profile_name.clone();
-
-            return Task::perform(
-                async move {
-                    let requires_totp = client.check_totp_required(&name).await.unwrap_or(false);
-                    (name, requires_totp)
-                },
-                |(name, requires_totp)| cosmic::Action::App(Message::OpenConnectDialog {
-                    profile_name: name,
-                    requires_totp,
-                }),
-            );
-        }
-
-        // Open the dialog directly
+        // Open the dialog directly - we'll show TOTP field unconditionally for now
+        // (can be left empty if not needed)
         let id = Id::unique();
-        *dialog = DialogState::Connect(ConnectDialog::new(id, profile_name, requires_totp));
+        *dialog = DialogState::Connect(ConnectDialog::new(id, profile_name, true));
+        eprintln!("Opened connect dialog");
         Task::none()
     }
 
@@ -720,10 +738,10 @@ impl OpenVpn3Status {
         let client = self.client.clone();
         Task::perform(
             async move {
-                client
-                    .start_session(&profile_name, &credentials)
-                    .await
-                    .map_err(|e| e.to_string())
+                match client {
+                    Some(client) => client.start_session(&profile_name, &credentials).await.map_err(|e| e.to_string()),
+                    None => Err("OpenVPN client not available".to_string()),
+                }
             },
             |result| cosmic::Action::App(Message::SessionStarted(result)),
         )

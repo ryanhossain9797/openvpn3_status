@@ -154,3 +154,21 @@ impl Default for ProfileRequirements {
         }
     }
 }
+
+/// Status update from D-Bus signals
+#[derive(Debug, Clone)]
+pub enum StatusUpdate {
+    /// Session status changed
+    SessionStatusChange {
+        session_path: String,
+        status: ConnectionStatus,
+    },
+    /// Session was closed
+    SessionClosed {
+        session_path: String,
+    },
+    /// Configuration changed
+    ConfigChange {
+        config_path: String,
+    },
+}
