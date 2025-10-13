@@ -11,12 +11,10 @@ use tokio::process::Command;
 pub struct OpenVpnClient;
 
 impl OpenVpnClient {
-    /// Create a new OpenVPN client instance
     pub fn new() -> Self {
         Self
     }
 
-    /// Check if OpenVPN 3 is available on the system
     pub async fn is_available() -> bool {
         Command::new("openvpn3")
             .arg("version")
