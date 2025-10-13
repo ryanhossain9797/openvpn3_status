@@ -26,6 +26,16 @@ pub enum Error {
     AuthenticationFailed(String),
     /// Invalid input
     InvalidInput(String),
+    /// D-Bus connection error
+    DbusConnection(String),
+    /// D-Bus method call error
+    DbusMethod(String),
+    /// D-Bus service not available
+    DbusServiceUnavailable(String),
+    /// D-Bus property access error
+    DbusProperty(String),
+    /// D-Bus signal handling error
+    DbusSignal(String),
 }
 
 impl fmt::Display for Error {
@@ -40,6 +50,11 @@ impl fmt::Display for Error {
             Self::NotAvailable => write!(f, "OpenVPN 3 is not available"),
             Self::AuthenticationFailed(msg) => write!(f, "Authentication failed: {}", msg),
             Self::InvalidInput(msg) => write!(f, "Invalid input: {}", msg),
+            Self::DbusConnection(msg) => write!(f, "D-Bus connection error: {}", msg),
+            Self::DbusMethod(msg) => write!(f, "D-Bus method call error: {}", msg),
+            Self::DbusServiceUnavailable(msg) => write!(f, "D-Bus service unavailable: {}", msg),
+            Self::DbusProperty(msg) => write!(f, "D-Bus property error: {}", msg),
+            Self::DbusSignal(msg) => write!(f, "D-Bus signal error: {}", msg),
         }
     }
 }
@@ -55,5 +70,11 @@ impl From<std::io::Error> for Error {
 impl From<serde_json::Error> for Error {
     fn from(err: serde_json::Error) -> Self {
         Self::JsonParse(err.to_string())
+    }
+}
+
+impl From<zbus::Error> for Error {
+    fn from(err: zbus::Error) -> Self {
+        Self::DbusMethod(err.to_string())
     }
 }

@@ -92,6 +92,56 @@ pub struct Session {
     pub status: ConnectionStatus,
 }
 
+/// A single credential input requirement from the VPN server
+#[derive(Debug, Clone)]
+pub struct CredentialInput {
+    /// Slot ID for this input
+    pub id: u32,
+    /// Input type (from ClientAttentionType enum)
+    pub input_type: u32,
+    /// Input group (from ClientAttentionGroup enum)
+    pub input_group: u32,
+    /// Display name (e.g., "Username", "Password", "Enter OTP")
+    pub name: String,
+    /// Description text
+    pub description: String,
+    /// Whether the input should be masked (hidden)
+    pub hidden: bool,
+    /// Whether this credential can be stored
+    pub can_store: bool,
+}
+
+impl CredentialInput {
+    /// Get unique ID for this input (combining type, group, and slot)
+    pub fn unique_id(&self) -> u32 {
+        // Combine type, group, and slot into a unique ID
+        // Formula: type * 1000000 + group * 1000 + slot
+        // This assumes type < 1000, group < 1000, and slot < 1000 (reasonable for OpenVPN)
+        self.input_type * 1000000 + self.input_group * 1000 + self.id
+    }
+}
+
+/// Dynamic credentials - map of input ID to value
+#[derive(Debug, Clone)]
+pub struct DynamicCredentials {
+    /// Map of input field ID to its value
+    pub values: HashMap<u32, String>,
+}
+
+impl DynamicCredentials {
+    /// Create new empty credentials
+    pub fn new() -> Self {
+        Self {
+            values: HashMap::new(),
+        }
+    }
+
+    /// Add a credential value
+    pub fn add(&mut self, id: u32, value: String) {
+        self.values.insert(id, value);
+    }
+}
+
 /// Authentication credentials for starting a session
 #[derive(Debug, Clone)]
 pub struct Credentials {
@@ -153,4 +203,22 @@ impl Default for ProfileRequirements {
             requires_totp: false,
         }
     }
+}
+
+/// Status update from D-Bus signals
+#[derive(Debug, Clone)]
+pub enum StatusUpdate {
+    /// Session status changed
+    SessionStatusChange {
+        session_path: String,
+        status: ConnectionStatus,
+    },
+    /// Session was closed
+    SessionClosed {
+        session_path: String,
+    },
+    /// Configuration changed
+    ConfigChange {
+        config_path: String,
+    },
 }
