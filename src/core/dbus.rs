@@ -21,9 +21,22 @@ impl DbusManager {
 
     /// Check if OpenVPN3 services are available
     pub async fn is_available(&self) -> bool {
-        // For now, just return true as a placeholder
-        // This will be implemented once we have the correct D-Bus method signatures
-        true
+        // Check if the configuration manager service is activatable
+        // OpenVPN 3 services are D-Bus activated (start on-demand), so we check
+        // if they're in the list of activatable services rather than currently running
+        match self.connection.call_method(
+            Some("org.freedesktop.DBus"),
+            "/org/freedesktop/DBus",
+            Some("org.freedesktop.DBus"),
+            "ListActivatableNames",
+            &(),
+        ).await {
+            Ok(response) => {
+                let services: Vec<String> = response.body().deserialize().unwrap_or_default();
+                services.contains(&"net.openvpn.v3.configuration".to_string())
+            }
+            Err(_) => false,
+        }
     }
 
     /// Get the underlying connection for signal handling

@@ -4,6 +4,15 @@ use super::dbus::AsyncDbusManager;
 use super::error::{Error, Result};
 use super::types::*;
 use std::path::Path;
+use zbus::zvariant::{ObjectPath, OwnedObjectPath};
+
+// D-Bus service names and paths
+const CONFIGURATION_SERVICE: &str = "net.openvpn.v3.configuration";
+const SESSION_SERVICE: &str = "net.openvpn.v3.sessions";
+const CONFIGURATION_PATH: &str = "/net/openvpn/v3/configuration";
+const SESSIONS_PATH: &str = "/net/openvpn/v3/sessions";
+const CONFIGURATION_INTERFACE: &str = "net.openvpn.v3.configuration";
+const SESSION_INTERFACE: &str = "net.openvpn.v3.sessions";
 
 /// OpenVPN 3 client interface using D-Bus API
 #[derive(Debug)]
@@ -26,9 +35,262 @@ impl OpenVpnClient {
 
     /// Get all OpenVPN profiles with their current status
     pub async fn get_profiles(&self) -> Result<Vec<Profile>> {
-        // For now, return an empty list as a placeholder
-        // This will be implemented once we have the correct D-Bus method signatures
-        Ok(Vec::new())
+        // Fetch all configuration paths
+        let config_paths = self.fetch_config_paths().await?;
+
+        // Fetch all active sessions
+        let sessions = self.fetch_sessions().await.unwrap_or_default();
+
+        // Build profile list with status
+        let mut profiles = Vec::new();
+
+        for config_path in config_paths {
+            let profile = self.build_profile(&config_path, &sessions).await?;
+            profiles.push(profile);
+        }
+
+        Ok(profiles)
+    }
+
+    /// Fetch all configuration paths from the configuration manager
+    async fn fetch_config_paths(&self) -> Result<Vec<OwnedObjectPath>> {
+        let response = self.dbus_manager.connection.call_method(
+            Some(CONFIGURATION_SERVICE),
+            CONFIGURATION_PATH,
+            Some(CONFIGURATION_INTERFACE),
+            "FetchAvailableConfigs",
+            &(),
+        ).await.map_err(|e| Error::DbusMethod(format!("Failed to fetch configs: {}", e)))?;
+
+        let paths: Vec<OwnedObjectPath> = response.body()
+            .deserialize()
+            .map_err(|e| Error::DbusMethod(format!("Failed to parse config paths: {}", e)))?;
+
+        Ok(paths)
+    }
+
+    /// Fetch all active sessions from the session manager
+    async fn fetch_sessions(&self) -> Result<Vec<Session>> {
+        // Get all session paths by calling FetchAvailableSessions
+        let response = match self.dbus_manager.connection.call_method(
+            Some(SESSION_SERVICE),
+            SESSIONS_PATH,
+            Some(SESSION_INTERFACE),
+            "FetchAvailableSessions",
+            &(),
+        ).await {
+            Ok(r) => r,
+            Err(_) => return Ok(Vec::new()),
+        };
+
+        let session_paths: Vec<OwnedObjectPath> = response.body()
+            .deserialize()
+            .unwrap_or_default();
+
+        let mut sessions = Vec::new();
+        for session_path in session_paths {
+            if let Ok(session) = self.fetch_session_info(&session_path).await {
+                sessions.push(session);
+            }
+        }
+
+        Ok(sessions)
+    }
+
+    /// Fetch session information from a session path
+    async fn fetch_session_info(&self, session_path: &OwnedObjectPath) -> Result<Session> {
+        // Get config_name property
+        let config_name = self.get_property(
+            session_path.as_str(),
+            SESSION_INTERFACE,
+            "config_name"
+        ).await?;
+
+        // Get status property (tuple of StatusMajor, StatusMinor, StatusMessage)
+        let status_tuple: (u32, u32, String) = self.get_property(
+            session_path.as_str(),
+            SESSION_INTERFACE,
+            "status"
+        ).await?;
+
+        let status = self.parse_status(status_tuple.0, status_tuple.1, &status_tuple.2);
+
+        Ok(Session {
+            path: session_path.to_string(),
+            profile_name: config_name,
+            status,
+        })
+    }
+
+    /// Parse OpenVPN status codes to ConnectionStatus
+    fn parse_status(&self, major: u32, minor: u32, message: &str) -> ConnectionStatus {
+        // Log the raw status for debugging
+        eprintln!("Status: major={}, minor={}, message=\"{}\"", major, minor, message);
+
+        // Based on OpenVPN 3 status codes from src/dbus/constants.hpp
+        // StatusMajor: 0=UNSET, 1=CONFIG, 2=CONNECTION, 3=SESSION, 4=PKCS11, 5=PROCESS
+        // StatusMinor for CONNECTION (major=2):
+        //   5=CONN_INIT, 6=CONN_CONNECTING, 7=CONN_CONNECTED
+        //   8=CONN_DISCONNECTING, 9=CONN_DISCONNECTED
+        //   10=CONN_FAILED, 11=CONN_AUTH_FAILED, 12=CONN_RECONNECTING
+        //   13=CONN_PAUSING, 14=CONN_PAUSED, 15=CONN_RESUMING, 16=CONN_DONE
+        let status = match (major, minor) {
+            // CONNECTION major (2)
+            (2, 7) => ConnectionStatus::Connected,      // CONN_CONNECTED
+            (2, 6) | (2, 12) | (2, 15) => ConnectionStatus::Connecting, // CONN_CONNECTING, CONN_RECONNECTING, CONN_RESUMING
+            (2, 10) | (2, 11) => ConnectionStatus::Failed, // CONN_FAILED, CONN_AUTH_FAILED
+            (2, 9) | (2, 8) | (2, 16) => ConnectionStatus::Disconnected, // CONN_DISCONNECTED, CONN_DISCONNECTING, CONN_DONE
+
+            // SESSION major (3) - treat as connection states
+            (3, _) => {
+                // Session events, check message
+                let msg_lower = message.to_lowercase();
+                if msg_lower.contains("failed") || msg_lower.contains("error") {
+                    ConnectionStatus::Failed
+                } else {
+                    ConnectionStatus::Disconnected
+                }
+            }
+
+            // Other states
+            _ => {
+                // Check message for additional context
+                let msg_lower = message.to_lowercase();
+                if msg_lower.contains("failed") || msg_lower.contains("error") {
+                    ConnectionStatus::Failed
+                } else if msg_lower.contains("connecting") {
+                    ConnectionStatus::Connecting
+                } else {
+                    ConnectionStatus::Disconnected
+                }
+            }
+        };
+
+        eprintln!("Parsed status: {:?}", status);
+        status
+    }
+
+    /// Build a Profile from a configuration path and session list
+    async fn build_profile(&self, config_path: &OwnedObjectPath, sessions: &[Session]) -> Result<Profile> {
+        // Get profile name
+        let name: String = self.get_property(
+            config_path.as_str(),
+            CONFIGURATION_INTERFACE,
+            "name"
+        ).await?;
+
+        // Get metadata properties
+        let metadata = self.fetch_metadata(config_path.as_str()).await?;
+
+        // Determine status from sessions
+        let status = sessions
+            .iter()
+            .filter(|s| s.profile_name == name)
+            .map(|s| s.status)
+            .max_by_key(|s| match s {
+                ConnectionStatus::Connected => 3,
+                ConnectionStatus::Connecting => 2,
+                ConnectionStatus::Failed => 1,
+                ConnectionStatus::Disconnected => 0,
+            })
+            .unwrap_or(ConnectionStatus::Disconnected);
+
+        Ok(Profile {
+            name,
+            path: config_path.to_string(),
+            status,
+            metadata,
+        })
+    }
+
+    /// Fetch profile metadata
+    async fn fetch_metadata(&self, config_path: &str) -> Result<ProfileMetadata> {
+
+        // Get properties directly from D-Bus
+        let valid: bool = self.get_property(
+            config_path,
+            CONFIGURATION_INTERFACE,
+            "valid"
+        ).await.unwrap_or(true);
+
+        let import_timestamp: u64 = self.get_property(
+            config_path,
+            CONFIGURATION_INTERFACE,
+            "import_timestamp"
+        ).await.unwrap_or(0);
+
+        let last_used_timestamp: u64 = self.get_property(
+            config_path,
+            CONFIGURATION_INTERFACE,
+            "last_used_timestamp"
+        ).await.unwrap_or(0);
+
+        let used_count: u32 = self.get_property(
+            config_path,
+            CONFIGURATION_INTERFACE,
+            "used_count"
+        ).await.unwrap_or(0);
+
+        // Convert timestamps to readable strings
+        let imported = if import_timestamp > 0 {
+            Self::format_timestamp(import_timestamp)
+        } else {
+            "unknown".to_string()
+        };
+
+        let last_used = if last_used_timestamp > 0 {
+            Self::format_timestamp(last_used_timestamp)
+        } else {
+            "never".to_string()
+        };
+
+        Ok(ProfileMetadata {
+            valid,
+            imported,
+            last_used,
+            use_count: used_count,
+        })
+    }
+
+    /// Format a Unix timestamp as a human-readable string
+    fn format_timestamp(timestamp: u64) -> String {
+        use chrono::{DateTime, Local};
+
+        if let Some(datetime) = DateTime::from_timestamp(timestamp as i64, 0) {
+            let local: DateTime<Local> = datetime.into();
+            local.format("%Y-%m-%d %H:%M:%S").to_string()
+        } else {
+            format!("{}", timestamp)
+        }
+    }
+
+    /// Helper to get a D-Bus property
+    async fn get_property<T>(&self, path: &str, interface: &str, property: &str) -> Result<T>
+    where
+        T: serde::de::DeserializeOwned + zbus::zvariant::Type + TryFrom<zbus::zvariant::OwnedValue>,
+        <T as TryFrom<zbus::zvariant::OwnedValue>>::Error: std::fmt::Debug,
+    {
+        use zbus::zvariant::OwnedValue;
+
+        // Call Get method from org.freedesktop.DBus.Properties interface
+        let message = self.dbus_manager.connection.call_method(
+            Some(interface),
+            path,
+            Some("org.freedesktop.DBus.Properties"),
+            "Get",
+            &(interface, property),
+        ).await.map_err(|e| Error::DbusProperty(format!("Failed to get property {}: {}", property, e)))?;
+
+        // D-Bus Properties.Get returns a Variant, deserialize to owned value
+        let variant: OwnedValue = message.body()
+            .deserialize()
+            .map_err(|e| Error::DbusProperty(format!("Failed to parse variant for property {}: {}", property, e)))?;
+
+        // Extract the actual value from the variant
+        let value: T = T::try_from(variant)
+            .map_err(|e| Error::DbusProperty(format!("Failed to convert property {} from variant: {:?}", property, e)))?;
+
+        Ok(value)
     }
 
     /// Get a specific profile by name
@@ -52,6 +314,10 @@ impl OpenVpnClient {
             )));
         }
 
+        // Read configuration file
+        let config_str = std::fs::read_to_string(path)
+            .map_err(|e| Error::InvalidInput(format!("Failed to read config file: {}", e)))?;
+
         // Determine profile name
         let profile_name = name
             .filter(|n| !n.trim().is_empty())
@@ -63,15 +329,36 @@ impl OpenVpnClient {
             })
             .ok_or_else(|| Error::InvalidInput("Could not determine profile name".to_string()))?;
 
-        // For now, just return the profile name as a placeholder
-        // This will be implemented once we have the correct D-Bus method signatures
+        // Call Import method on configuration manager
+        let response = self.dbus_manager.connection.call_method(
+            Some(CONFIGURATION_SERVICE),
+            CONFIGURATION_PATH,
+            Some(CONFIGURATION_INTERFACE),
+            "Import",
+            &(profile_name.as_str(), config_str.as_str(), false, true),
+        ).await.map_err(|e| Error::DbusMethod(format!("Failed to import config: {}", e)))?;
+
+        let _config_path: OwnedObjectPath = response.body()
+            .deserialize()
+            .map_err(|e| Error::DbusMethod(format!("Failed to parse import response: {}", e)))?;
+
         Ok(profile_name)
     }
 
     /// Delete a profile by name
     pub async fn delete_profile(&self, name: &str) -> Result<()> {
-        // For now, just return success as a placeholder
-        // This will be implemented once we have the correct D-Bus method signatures
+        // Find the profile's D-Bus path
+        let profile = self.get_profile(name).await?;
+
+        // Call Remove method on the configuration object
+        self.dbus_manager.connection.call_method(
+            Some(CONFIGURATION_SERVICE),
+            profile.path.as_str(),
+            Some(CONFIGURATION_INTERFACE),
+            "Remove",
+            &(),
+        ).await.map_err(|e| Error::DbusMethod(format!("Failed to delete profile: {}", e)))?;
+
         Ok(())
     }
 
@@ -79,23 +366,164 @@ impl OpenVpnClient {
     pub async fn start_session(&self, profile_name: &str, credentials: &Credentials) -> Result<()> {
         credentials.validate().map_err(Error::InvalidInput)?;
 
-        // For now, just return success as a placeholder
-        // This will be implemented once we have the correct D-Bus method signatures
+        // Find the profile's D-Bus path
+        let profile = self.get_profile(profile_name).await?;
+
+        // Create a new tunnel (session)
+        let response = self.dbus_manager.connection.call_method(
+            Some(SESSION_SERVICE),
+            SESSIONS_PATH,
+            Some(SESSION_INTERFACE),
+            "NewTunnel",
+            &(ObjectPath::try_from(profile.path.as_str()).unwrap(),),
+        ).await.map_err(|e| Error::DbusMethod(format!("Failed to create tunnel: {}", e)))?;
+
+        let session_path: OwnedObjectPath = response.body()
+            .deserialize()
+            .map_err(|e| Error::DbusMethod(format!("Failed to parse session path: {}", e)))?;
+
+        // Provide user credentials via UserInputProvide method
+        // This is typically done through the backend client interface
+        self.provide_credentials(&session_path, credentials).await?;
+
+        // Start the connection
+        let _: () = self.dbus_manager.connection.call_method(
+            Some(SESSION_SERVICE),
+            session_path.as_str(),
+            Some(SESSION_INTERFACE),
+            "Connect",
+            &(),
+        ).await
+            .and_then(|r| r.body().deserialize())
+            .map_err(|e| Error::DbusMethod(format!("Failed to connect session: {}", e)))?;
+
+        Ok(())
+    }
+
+    /// Provide user credentials to a session
+    async fn provide_credentials(&self, session_path: &OwnedObjectPath, credentials: &Credentials) -> Result<()> {
+        // Query what inputs are needed from the session
+        let response = self.dbus_manager.connection.call_method(
+            Some(SESSION_SERVICE),
+            session_path.as_str(),
+            Some(SESSION_INTERFACE),
+            "UserInputQueueGetTypeGroup",
+            &(),
+        ).await.map_err(|e| Error::DbusMethod(format!("Failed to get input queue: {}", e)))?;
+
+        let type_groups: Vec<(u32, u32)> = response.body()
+            .deserialize()
+            .map_err(|e| Error::DbusMethod(format!("Failed to parse type groups: {}", e)))?;
+
+        // For each (type, group) pair, fetch required inputs and provide values
+        for (input_type, input_group) in type_groups {
+            // Check which slots need input for this type/group
+            let response = self.dbus_manager.connection.call_method(
+                Some(SESSION_SERVICE),
+                session_path.as_str(),
+                Some(SESSION_INTERFACE),
+                "UserInputQueueCheck",
+                &(input_type, input_group),
+            ).await.map_err(|e| Error::DbusMethod(format!("Failed to check input queue: {}", e)))?;
+
+            let slot_ids: Vec<u32> = response.body()
+                .deserialize()
+                .map_err(|e| Error::DbusMethod(format!("Failed to parse slot IDs: {}", e)))?;
+
+            // For each slot, fetch details and provide appropriate value
+            for slot_id in slot_ids {
+                let response = self.dbus_manager.connection.call_method(
+                    Some(SESSION_SERVICE),
+                    session_path.as_str(),
+                    Some(SESSION_INTERFACE),
+                    "UserInputQueueFetch",
+                    &(input_type, input_group, slot_id),
+                ).await.map_err(|e| Error::DbusMethod(format!("Failed to fetch input details: {}", e)))?;
+
+                let input_details: (u32, u32, u32, String, String, bool) = response.body()
+                    .deserialize()
+                    .map_err(|e| Error::DbusMethod(format!("Failed to parse input details: {}", e)))?;
+
+                let (_, _, id, name, _description, _hidden) = input_details;
+
+                // Match the input name to determine which credential to provide
+                let value = if name.to_lowercase().contains("user") || name.to_lowercase().contains("name") {
+                    Some(&credentials.username)
+                } else if name.to_lowercase().contains("pass") {
+                    Some(&credentials.password)
+                } else if name.to_lowercase().contains("otp") || name.to_lowercase().contains("challenge") {
+                    credentials.totp.as_ref()
+                } else {
+                    None
+                };
+
+                if let Some(value) = value {
+                    // Provide the input value
+                    self.dbus_manager.connection.call_method(
+                        Some(SESSION_SERVICE),
+                        session_path.as_str(),
+                        Some(SESSION_INTERFACE),
+                        "UserInputProvide",
+                        &(input_type, input_group, id, value.clone()),
+                    ).await.map_err(|e| Error::DbusMethod(format!("Failed to provide {}: {}", name, e)))?;
+                }
+            }
+        }
+
         Ok(())
     }
 
     /// Disconnect all sessions for a profile
     pub async fn disconnect_profile(&self, profile_name: &str) -> Result<()> {
-        // For now, just return success as a placeholder
-        // This will be implemented once we have the correct D-Bus method signatures
+        // Fetch all sessions and find ones matching this profile
+        let sessions = self.fetch_sessions().await?;
+
+        for session in sessions {
+            if session.profile_name == profile_name {
+                // Call Disconnect on the session
+                self.dbus_manager.connection.call_method(
+                    Some(SESSION_SERVICE),
+                    session.path.as_str(),
+                    Some(SESSION_INTERFACE),
+                    "Disconnect",
+                    &(),
+                ).await.map_err(|e| Error::DbusMethod(format!("Failed to disconnect session: {}", e)))?;
+            }
+        }
+
         Ok(())
     }
 
     /// Check if a profile requires TOTP
     pub async fn check_totp_required(&self, profile_name: &str) -> Result<bool> {
-        // For now, return false as a placeholder
-        // This will be implemented once we have the correct D-Bus method signatures
-        Ok(false)
+        // Find the profile
+        let profile = self.get_profile(profile_name).await?;
+
+        // Fetch the configuration as JSON
+        let response = self.dbus_manager.connection.call_method(
+            Some(CONFIGURATION_SERVICE),
+            profile.path.as_str(),
+            Some(CONFIGURATION_INTERFACE),
+            "FetchJSON",
+            &(),
+        ).await.map_err(|e| Error::DbusMethod(format!("Failed to fetch config JSON: {}", e)))?;
+
+        let json_str: String = response.body()
+            .deserialize()
+            .map_err(|e| Error::DbusMethod(format!("Failed to parse JSON response: {}", e)))?;
+
+        // Parse and check for TOTP/2FA requirements
+        if let Ok(json_value) = serde_json::from_str::<serde_json::Value>(&json_str) {
+            // Check various fields that might indicate TOTP requirement
+            let requires_totp = json_value.get("static-challenge")
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_lowercase().contains("otp") || s.to_lowercase().contains("2fa"))
+                .unwrap_or(false);
+
+            Ok(requires_totp)
+        } else {
+            Ok(false)
+        }
     }
 
     /// Set up signal monitoring for real-time status updates
@@ -116,9 +544,7 @@ impl OpenVpnClient {
 
 impl Clone for OpenVpnClient {
     fn clone(&self) -> Self {
-        // Since we can't clone the D-Bus connection, we'll create a new one
-        // This is not ideal but necessary for the current architecture
-        // In a real implementation, you might want to use Arc<Mutex<DbusManager>> or similar
+        // Since we can clone the D-Bus connection, we can clone the client
         Self {
             dbus_manager: AsyncDbusManager {
                 connection: self.dbus_manager.connection.clone(),
