@@ -12,12 +12,22 @@ use crate::core::{Credentials, OpenVpnClient, Profile};
 const AUTO_REFRESH_INTERVAL_SECS: u64 = 3;
 
 /// Main application state
-#[derive(Default)]
 pub struct OpenVpn3Status {
     core: Core,
     popup: Option<Id>,
-    client: OpenVpnClient,
+    client: Option<OpenVpnClient>,
     state: AppState,
+}
+
+impl Default for OpenVpn3Status {
+    fn default() -> Self {
+        Self {
+            core: Core::default(),
+            popup: None,
+            client: None,
+            state: AppState::default(),
+        }
+    }
 }
 
 /// Application state container
@@ -105,6 +115,9 @@ pub enum Message {
     TogglePopup,
     PopupClosed(Id),
 
+    // Client initialization
+    ClientInitialized(Option<OpenVpnClient>),
+
     // Profile operations
     RefreshProfiles,
     ProfilesLoaded(Result<Vec<Profile>, String>),
@@ -149,24 +162,27 @@ impl Application for OpenVpn3Status {
     }
 
     fn init(core: Core, _flags: Self::Flags) -> (Self, Task<Self::Message>) {
-        let client = OpenVpnClient::new();
         let app = Self {
             core,
             popup: None,
-            client,
+            client: None,
             state: AppState::default(),
         };
 
         // Initialize async
         let task = Task::perform(
-            OpenVpnClient::is_available(),
-            |should_load| {
-                if should_load {
-                    cosmic::Action::App(Message::RefreshProfiles)
+            async {
+                let is_available = OpenVpnClient::is_available().await;
+                if is_available {
+                    match OpenVpnClient::new().await {
+                        Ok(client) => Some(client),
+                        Err(_) => None,
+                    }
                 } else {
-                    cosmic::Action::App(Message::ProfilesLoaded(Ok(Vec::new())))
+                    None
                 }
             },
+            |client| cosmic::Action::App(Message::ClientInitialized(client)),
         );
 
         (app, task)
@@ -206,6 +222,7 @@ impl Application for OpenVpn3Status {
         match message {
             Message::TogglePopup => self.handle_toggle_popup(),
             Message::PopupClosed(id) => self.handle_popup_closed(id),
+            Message::ClientInitialized(client) => self.handle_client_initialized(client),
             Message::RefreshProfiles => self.handle_refresh_profiles(),
             Message::ProfilesLoaded(result) => self.handle_profiles_loaded(result),
             Message::DeleteProfile(name) => self.handle_delete_profile(name),
@@ -446,14 +463,23 @@ impl OpenVpn3Status {
         Task::none()
     }
 
+    fn handle_client_initialized(&mut self, client: Option<OpenVpnClient>) -> Task<Message> {
+        self.client = client;
+        if self.client.is_some() {
+            self.handle_refresh_profiles()
+        } else {
+            Task::none()
+        }
+    }
+
     fn handle_refresh_profiles(&mut self) -> Task<Message> {
         let client = self.client.clone();
         Task::perform(
             async move {
-                client
-                    .get_profiles()
-                    .await
-                    .map_err(|e| e.to_string())
+                match client {
+                    Some(client) => client.get_profiles().await.map_err(|e| e.to_string()),
+                    None => Ok(Vec::new()),
+                }
             },
             |result| cosmic::Action::App(Message::ProfilesLoaded(result)),
         )
@@ -500,7 +526,10 @@ impl OpenVpn3Status {
         let client = self.client.clone();
         Task::perform(
             async move {
-                let result = client.delete_profile(&name).await.map_err(|e| e.to_string());
+                let result = match client {
+                    Some(client) => client.delete_profile(&name).await.map_err(|e| e.to_string()),
+                    None => Err("OpenVPN client not available".to_string()),
+                };
                 (name, result)
             },
             |(name, result)| cosmic::Action::App(Message::ProfileDeleted(name, result)),
@@ -532,7 +561,10 @@ impl OpenVpn3Status {
         let client = self.client.clone();
         Task::perform(
             async move {
-                let result = client.disconnect_profile(&name).await.map_err(|e| e.to_string());
+                let result = match client {
+                    Some(client) => client.disconnect_profile(&name).await.map_err(|e| e.to_string()),
+                    None => Err("OpenVPN client not available".to_string()),
+                };
                 (name, result)
             },
             |(name, result)| cosmic::Action::App(Message::SessionDisconnected(name, result)),
@@ -617,10 +649,10 @@ impl OpenVpn3Status {
         let client = self.client.clone();
         Task::perform(
             async move {
-                client
-                    .import_config(&file_path, custom_name.as_deref())
-                    .await
-                    .map_err(|e| e.to_string())
+                match client {
+                    Some(client) => client.import_config(&file_path, custom_name.as_deref()).await.map_err(|e| e.to_string()),
+                    None => Err("OpenVPN client not available".to_string()),
+                }
             },
             |result| cosmic::Action::App(Message::ConfigImported(result)),
         )
@@ -656,7 +688,10 @@ impl OpenVpn3Status {
 
             return Task::perform(
                 async move {
-                    let requires_totp = client.check_totp_required(&name).await.unwrap_or(false);
+                    let requires_totp = match client {
+                        Some(client) => client.check_totp_required(&name).await.unwrap_or(false),
+                        None => false,
+                    };
                     (name, requires_totp)
                 },
                 |(name, requires_totp)| cosmic::Action::App(Message::OpenConnectDialog {
@@ -720,10 +755,10 @@ impl OpenVpn3Status {
         let client = self.client.clone();
         Task::perform(
             async move {
-                client
-                    .start_session(&profile_name, &credentials)
-                    .await
-                    .map_err(|e| e.to_string())
+                match client {
+                    Some(client) => client.start_session(&profile_name, &credentials).await.map_err(|e| e.to_string()),
+                    None => Err("OpenVPN client not available".to_string()),
+                }
             },
             |result| cosmic::Action::App(Message::SessionStarted(result)),
         )
