@@ -89,14 +89,9 @@ uninstall:
     rm {{bin-dst}}
     rm {{desktop-dst}}
     rm {{metainfo-dst}}
-    # Remove custom logo_dark.svg icon
-    rm "{{icons-dst}}/256x256/apps/logo_dark.svg"
-    rm "{{icons-dst}}/128x128/apps/logo_dark.svg"
-    rm "{{icons-dst}}/64x64/apps/logo_dark.svg"
-    rm "{{icons-dst}}/48x48/apps/logo_dark.svg"
-    rm "{{icons-dst}}/32x32/apps/logo_dark.svg"
-    rm "{{icons-dst}}/24x24/apps/logo_dark.svg"
-    rm "{{icons-dst}}/16x16/apps/logo_dark.svg"
+    # Remove custom openvpn3_status_cosmic_logo icons
+    rm "{{icons-dst}}/scalable/status/openvpn3_status_cosmic_logo_filled.svg"
+    rm "{{icons-dst}}/scalable/status/openvpn3_status_cosmic_logo_outline.svg"
 
 # Vendor dependencies locally
 vendor:
