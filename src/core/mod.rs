@@ -8,4 +8,4 @@ pub mod types;
 
 // Re-export commonly used types
 pub use openvpn_dbus::OpenVpnClient;
-pub use types::{CredentialInput, Credentials, DynamicCredentials, Profile};
+pub use types::{CredentialInput, Credentials, Profile};
