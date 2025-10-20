@@ -352,7 +352,8 @@ impl OpenVpn3Status {
         let content = widget::column()
             .spacing(10)
             .padding(20)
-            .push(widget::text("OpenVPN 3 not available").size(16));
+            .push(widget::text("Connecting to OpenVPN 3...").size(16))
+            .push(widget::text("If this persists, check if OpenVPN 3 is installed").size(12));
 
         self.core.applet.popup_container(content).into()
     }
@@ -503,10 +504,17 @@ impl OpenVpn3Status {
         if let Some(p) = self.popup.take() {
             destroy_popup(p)
         } else {
-            // Refresh when opening
+            // When opening, check state and handle accordingly
             let refresh_task = match &self.state {
-                AppState::Available { .. } => self.handle_refresh_profiles(),
-                AppState::Unavailable => Task::none(),
+                AppState::Available { .. } => {
+                    // Refresh profiles if already available
+                    self.handle_refresh_profiles()
+                }
+                AppState::Unavailable => {
+                    // Auto-retry initialization if service might be activatable
+                    eprintln!("OpenVPN not available, attempting auto-retry...");
+                    Self::retry_initialization()
+                }
             };
 
             let new_id = Id::unique();
@@ -542,6 +550,24 @@ impl OpenVpn3Status {
         } else {
             Task::none()
         }
+    }
+
+    fn retry_initialization() -> Task<Message> {
+        eprintln!("Retrying OpenVPN3 client initialization...");
+        Task::perform(
+            async {
+                let is_available = OpenVpnClient::is_available().await;
+                if is_available {
+                    match OpenVpnClient::new().await {
+                        Ok(client) => Some(client),
+                        Err(_) => None,
+                    }
+                } else {
+                    None
+                }
+            },
+            |client| cosmic::Action::App(Message::ClientInitialized(client)),
+        )
     }
 
     fn handle_refresh_profiles(&mut self) -> Task<Message> {
