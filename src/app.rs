@@ -159,7 +159,6 @@ pub enum Message {
 
     // Client initialization
     ClientInitialized(Option<OpenVpnClient>),
-    RetryInitialization,
 
     // Profile operations
     RefreshProfiles,
@@ -281,7 +280,6 @@ impl Application for OpenVpn3Status {
             Message::TogglePopup => self.handle_toggle_popup(),
             Message::PopupClosed(id) => self.handle_popup_closed(id),
             Message::ClientInitialized(client) => self.handle_client_initialized(client),
-            Message::RetryInitialization => self.handle_retry_initialization(),
             Message::RefreshProfiles => self.handle_refresh_profiles(),
             Message::ProfilesLoaded(result) => self.handle_profiles_loaded(result),
             Message::DeleteProfile(name) => self.handle_delete_profile(name),
@@ -351,14 +349,11 @@ impl Application for OpenVpn3Status {
 // View methods
 impl OpenVpn3Status {
     fn view_unavailable(&self) -> Element<'_, Message> {
-        let retry_button = widget::button::standard("Retry").on_press(Message::RetryInitialization);
-
         let content = widget::column()
             .spacing(10)
             .padding(20)
             .push(widget::text("Connecting to OpenVPN 3...").size(16))
-            .push(widget::text("If this persists, check if OpenVPN 3 is installed").size(12))
-            .push(retry_button);
+            .push(widget::text("If this persists, check if OpenVPN 3 is installed").size(12));
 
         self.core.applet.popup_container(content).into()
     }
@@ -518,7 +513,7 @@ impl OpenVpn3Status {
                 AppState::Unavailable => {
                     // Auto-retry initialization if service might be activatable
                     eprintln!("OpenVPN not available, attempting auto-retry...");
-                    self.handle_retry_initialization()
+                    Self::retry_initialization()
                 }
             };
 
@@ -557,7 +552,7 @@ impl OpenVpn3Status {
         }
     }
 
-    fn handle_retry_initialization(&mut self) -> Task<Message> {
+    fn retry_initialization() -> Task<Message> {
         eprintln!("Retrying OpenVPN3 client initialization...");
         Task::perform(
             async {
