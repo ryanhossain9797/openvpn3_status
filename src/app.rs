@@ -9,6 +9,7 @@ use cosmic::{Application, Element};
 
 use crate::core::types::ConnectionStatus;
 use crate::core::{CredentialInput, Credentials, OpenVpnClient, Profile};
+use crate::fl;
 use std::sync::Arc;
 
 const AUTO_REFRESH_INTERVAL_SECS: u64 = 3;
@@ -301,11 +302,14 @@ impl Application for OpenVpn3Status {
 // View methods
 impl OpenVpn3Status {
     fn view_unavailable(&self) -> Element<'_, Message> {
+        let connecting_text = fl!("status-connecting");
+        let unavailable_text = fl!("status-unavailable");
+
         let content = widget::column()
             .spacing(10)
             .padding(20)
-            .push(widget::text("Connecting to OpenVPN 3...").size(16))
-            .push(widget::text("If this persists, check if OpenVPN 3 is installed").size(12));
+            .push(widget::text(connecting_text).size(16))
+            .push(widget::text(unavailable_text).size(12));
 
         self.core.applet.popup_container(content).into()
     }
@@ -315,15 +319,21 @@ impl OpenVpn3Status {
             return self.view_unavailable();
         };
 
+        let title_text = fl!("app-title");
+        let refresh_text = fl!("button-refresh");
+        let import_text = fl!("button-import");
+        let no_profiles_text = fl!("status-no-profiles");
+
         let mut content = widget::column().spacing(10).padding(20);
 
         // Header
-        content = content.push(widget::text("OpenVPN 3 Profiles").size(18));
+        content = content.push(widget::text(title_text).size(18));
 
         // Action buttons
-        let refresh_button = widget::button::standard("Refresh").on_press(Message::RefreshProfiles);
+        let refresh_button =
+            widget::button::standard(refresh_text).on_press(Message::RefreshProfiles);
         let import_button =
-            widget::button::standard("Import Config").on_press(Message::OpenImportDialog);
+            widget::button::standard(import_text).on_press(Message::OpenImportDialog);
         let button_row = widget::row()
             .push(refresh_button)
             .push(import_button)
@@ -333,7 +343,7 @@ impl OpenVpn3Status {
 
         // Profiles list
         if profiles.is_empty() {
-            content = content.push(widget::text("No profiles found"));
+            content = content.push(widget::text(no_profiles_text));
         } else {
             for profile in profiles {
                 content = content.push(self.view_profile_row(profile));
@@ -346,9 +356,13 @@ impl OpenVpn3Status {
     fn view_profile_row<'a>(&'a self, profile: &'a Profile) -> Element<'a, Message> {
         let name_text = widget::text(&profile.name).width(cosmic::iced::Length::Fill);
 
+        let disconnect_text = fl!("button-disconnect");
+        let connect_text = fl!("button-connect");
+        let delete_text = fl!("button-delete");
+
         let row = match profile.status {
             ConnectionStatus::Connected | ConnectionStatus::Connecting => {
-                let disconnect_btn = widget::button::destructive("Disconnect")
+                let disconnect_btn = widget::button::destructive(disconnect_text)
                     .on_press(Message::DisconnectSession(profile.name.clone()));
                 widget::row()
                     .push(name_text)
@@ -357,9 +371,9 @@ impl OpenVpn3Status {
             }
             ConnectionStatus::Disconnected | ConnectionStatus::Failed => {
                 // Use the credential flow that queries server requirements
-                let connect_btn = widget::button::suggested("Connect")
+                let connect_btn = widget::button::suggested(connect_text)
                     .on_press(Message::StartTunnelCreation(profile.name.clone()));
-                let delete_btn = widget::button::destructive("Delete")
+                let delete_btn = widget::button::destructive(delete_text)
                     .on_press(Message::DeleteProfile(profile.name.clone()));
                 widget::row()
                     .push(name_text)
@@ -373,15 +387,20 @@ impl OpenVpn3Status {
     }
 
     fn view_import_dialog<'a>(&'a self, dialog: &'a ImportDialog) -> Element<'a, Message> {
+        let import_text = fl!("button-import");
+        let cancel_text = fl!("button-cancel");
+        let title_text = fl!("import-title");
+
+        // Note: text_input placeholders need static strings, using English for now
         let file_path_input = widget::text_input("File path", &dialog.file_path)
             .on_input(Message::ImportFilePathChanged);
 
         let custom_name_input = widget::text_input("Custom name (optional)", &dialog.custom_name)
             .on_input(Message::ImportCustomNameChanged);
 
-        let submit_button = widget::button::suggested("Import").on_press(Message::SubmitImport);
+        let submit_button = widget::button::suggested(import_text).on_press(Message::SubmitImport);
         let cancel_button =
-            widget::button::standard("Cancel").on_press(Message::CloseImportDialog(dialog.id));
+            widget::button::standard(cancel_text).on_press(Message::CloseImportDialog(dialog.id));
 
         let button_row = widget::row()
             .push(submit_button)
@@ -389,7 +408,7 @@ impl OpenVpn3Status {
             .spacing(10);
 
         let dialog_content = widget::column()
-            .push(widget::text("Import OpenVPN Config"))
+            .push(widget::text(title_text))
             .push(file_path_input)
             .push(custom_name_input)
             .push(button_row)
@@ -943,6 +962,10 @@ impl OpenVpn3Status {
 
     // View methods for connect dialog
     fn view_waiting_dialog<'a>(&'a self, profile_name: &'a str) -> Element<'a, Message> {
+        let cancel_text = fl!("button-cancel");
+        let connecting_text = fl!("profile-connecting", name = profile_name.to_string());
+        let waiting_text = fl!("status-waiting");
+
         // Get the session_path from the dialog state
         let session_path =
             if let Some(DialogState::WaitingForCredentialRequirements { session_path, .. }) =
@@ -954,13 +977,13 @@ impl OpenVpn3Status {
             };
 
         let cancel_button =
-            widget::button::standard("Cancel").on_press(Message::CancelConnect(session_path));
+            widget::button::standard(cancel_text).on_press(Message::CancelConnect(session_path));
 
         let content = widget::column()
             .spacing(10)
             .padding(20)
-            .push(widget::text(format!("Connecting to {}...", profile_name)))
-            .push(widget::text("Waiting for server..."))
+            .push(widget::text(connecting_text))
+            .push(widget::text(waiting_text))
             .push(cancel_button);
 
         let container = widget::container(content).width(400).height(150);
@@ -968,9 +991,11 @@ impl OpenVpn3Status {
     }
 
     fn view_connect_dialog<'a>(&'a self, dialog: &'a ConnectDialog) -> Element<'a, Message> {
-        let mut content = widget::column()
-            .push(widget::text(format!("Connect to {}", dialog.profile_name)))
-            .spacing(10);
+        let title_text = fl!("connect-title", name = dialog.profile_name.clone());
+        let connect_text = fl!("button-connect");
+        let cancel_text = fl!("button-cancel");
+
+        let mut content = widget::column().push(widget::text(title_text)).spacing(10);
 
         // Build input fields dynamically based on server requirements
         for input in &dialog.required_inputs {
@@ -997,12 +1022,12 @@ impl OpenVpn3Status {
         // Buttons
         let connect_enabled = dialog.is_valid();
         let connect_button = if connect_enabled {
-            widget::button::suggested("Connect").on_press(Message::SubmitCredentials)
+            widget::button::suggested(connect_text).on_press(Message::SubmitCredentials)
         } else {
-            widget::button::suggested("Connect")
+            widget::button::suggested(connect_text)
         };
 
-        let cancel_button = widget::button::standard("Cancel")
+        let cancel_button = widget::button::standard(cancel_text)
             .on_press(Message::CancelConnect(dialog.session_path.clone()));
 
         let button_row = widget::row()
