@@ -61,17 +61,23 @@ impl OpenVpnClient {
         let mut last_error = None;
 
         for attempt in 1..=3 {
-            match self.dbus_manager.connection.call_method(
-                Some(CONFIGURATION_SERVICE),
-                CONFIGURATION_PATH,
-                Some(CONFIGURATION_INTERFACE),
-                "FetchAvailableConfigs",
-                &(),
-            ).await {
+            match self
+                .dbus_manager
+                .connection
+                .call_method(
+                    Some(CONFIGURATION_SERVICE),
+                    CONFIGURATION_PATH,
+                    Some(CONFIGURATION_INTERFACE),
+                    "FetchAvailableConfigs",
+                    &(),
+                )
+                .await
+            {
                 Ok(response) => {
-                    let paths: Vec<OwnedObjectPath> = response.body()
-                        .deserialize()
-                        .map_err(|e| Error::DbusMethod(format!("Failed to parse config paths: {}", e)))?;
+                    let paths: Vec<OwnedObjectPath> =
+                        response.body().deserialize().map_err(|e| {
+                            Error::DbusMethod(format!("Failed to parse config paths: {}", e))
+                        })?;
                     return Ok(paths);
                 }
                 Err(e) => {
@@ -80,7 +86,10 @@ impl OpenVpnClient {
                     // If the service is not activated yet, wait and retry
                     if error_msg.contains("UnknownMethod") || error_msg.contains("does not exist") {
                         if attempt < 3 {
-                            eprintln!("OpenVPN3 service activating, retrying... (attempt {}/3)", attempt);
+                            eprintln!(
+                                "OpenVPN3 service activating, retrying... (attempt {}/3)",
+                                attempt
+                            );
                             tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
                             last_error = Some(e);
                             continue;
@@ -93,8 +102,12 @@ impl OpenVpnClient {
             }
         }
 
-        Err(Error::DbusMethod(format!("Failed to fetch configs after retries: {}",
-            last_error.map(|e| e.to_string()).unwrap_or_else(|| "Unknown error".to_string()))))
+        Err(Error::DbusMethod(format!(
+            "Failed to fetch configs after retries: {}",
+            last_error
+                .map(|e| e.to_string())
+                .unwrap_or_else(|| "Unknown error".to_string())
+        )))
     }
 
     /// Fetch all active sessions from the session manager
@@ -103,13 +116,18 @@ impl OpenVpnClient {
         let mut response_result = None;
 
         for attempt in 1..=3 {
-            match self.dbus_manager.connection.call_method(
-                Some(SESSION_SERVICE),
-                SESSIONS_PATH,
-                Some(SESSION_INTERFACE),
-                "FetchAvailableSessions",
-                &(),
-            ).await {
+            match self
+                .dbus_manager
+                .connection
+                .call_method(
+                    Some(SESSION_SERVICE),
+                    SESSIONS_PATH,
+                    Some(SESSION_INTERFACE),
+                    "FetchAvailableSessions",
+                    &(),
+                )
+                .await
+            {
                 Ok(r) => {
                     response_result = Some(r);
                     break;
@@ -120,7 +138,10 @@ impl OpenVpnClient {
                     // If the service is not activated yet, wait and retry
                     if error_msg.contains("UnknownMethod") || error_msg.contains("does not exist") {
                         if attempt < 3 {
-                            eprintln!("OpenVPN3 sessions service activating, retrying... (attempt {}/3)", attempt);
+                            eprintln!(
+                                "OpenVPN3 sessions service activating, retrying... (attempt {}/3)",
+                                attempt
+                            );
                             tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
                             continue;
                         }
@@ -139,9 +160,7 @@ impl OpenVpnClient {
             }
         };
 
-        let session_paths: Vec<OwnedObjectPath> = response.body()
-            .deserialize()
-            .unwrap_or_default();
+        let session_paths: Vec<OwnedObjectPath> = response.body().deserialize().unwrap_or_default();
 
         let mut sessions = Vec::new();
         for session_path in session_paths {
@@ -156,18 +175,14 @@ impl OpenVpnClient {
     /// Fetch session information from a session path
     async fn fetch_session_info(&self, session_path: &OwnedObjectPath) -> Result<Session> {
         // Get config_name property
-        let config_name = self.get_property(
-            session_path.as_str(),
-            SESSION_INTERFACE,
-            "config_name"
-        ).await?;
+        let config_name = self
+            .get_property(session_path.as_str(), SESSION_INTERFACE, "config_name")
+            .await?;
 
         // Get status property (tuple of StatusMajor, StatusMinor, StatusMessage)
-        let status_tuple: (u32, u32, String) = self.get_property(
-            session_path.as_str(),
-            SESSION_INTERFACE,
-            "status"
-        ).await?;
+        let status_tuple: (u32, u32, String) = self
+            .get_property(session_path.as_str(), SESSION_INTERFACE, "status")
+            .await?;
 
         let status = self.parse_status(status_tuple.0, status_tuple.1, &status_tuple.2);
 
@@ -181,7 +196,10 @@ impl OpenVpnClient {
     /// Parse OpenVPN status codes to ConnectionStatus
     fn parse_status(&self, major: u32, minor: u32, message: &str) -> ConnectionStatus {
         // Log the raw status for debugging
-        eprintln!("Status: major={}, minor={}, message=\"{}\"", major, minor, message);
+        eprintln!(
+            "Status: major={}, minor={}, message=\"{}\"",
+            major, minor, message
+        );
 
         // Based on OpenVPN 3 status codes from src/dbus/constants.hpp
         // StatusMajor: 0=UNSET, 1=CONFIG, 2=CONNECTION, 3=SESSION, 4=PKCS11, 5=PROCESS
@@ -193,8 +211,8 @@ impl OpenVpnClient {
         //   13=CONN_PAUSING, 14=CONN_PAUSED, 15=CONN_RESUMING, 16=CONN_DONE
         let status = match (major, minor) {
             // CONNECTION major (2)
-            (2, 4) => ConnectionStatus::Connecting,     // CFG_REQUIRE_USER - waiting for credentials
-            (2, 7) => ConnectionStatus::Connected,      // CONN_CONNECTED
+            (2, 4) => ConnectionStatus::Connecting, // CFG_REQUIRE_USER - waiting for credentials
+            (2, 7) => ConnectionStatus::Connected,  // CONN_CONNECTED
             (2, 6) | (2, 12) | (2, 15) => ConnectionStatus::Connecting, // CONN_CONNECTING, CONN_RECONNECTING, CONN_RESUMING
             (2, 10) | (2, 11) => ConnectionStatus::Failed, // CONN_FAILED, CONN_AUTH_FAILED
             (2, 9) | (2, 8) | (2, 16) => ConnectionStatus::Disconnected, // CONN_DISCONNECTED, CONN_DISCONNECTING, CONN_DONE
@@ -229,13 +247,15 @@ impl OpenVpnClient {
     }
 
     /// Build a Profile from a configuration path and session list
-    async fn build_profile(&self, config_path: &OwnedObjectPath, sessions: &[Session]) -> Result<Profile> {
+    async fn build_profile(
+        &self,
+        config_path: &OwnedObjectPath,
+        sessions: &[Session],
+    ) -> Result<Profile> {
         // Get profile name
-        let name: String = self.get_property(
-            config_path.as_str(),
-            CONFIGURATION_INTERFACE,
-            "name"
-        ).await?;
+        let name: String = self
+            .get_property(config_path.as_str(), CONFIGURATION_INTERFACE, "name")
+            .await?;
 
         // Get metadata properties
         let metadata = self.fetch_metadata(config_path.as_str()).await?;
@@ -263,31 +283,26 @@ impl OpenVpnClient {
 
     /// Fetch profile metadata
     async fn fetch_metadata(&self, config_path: &str) -> Result<ProfileMetadata> {
-
         // Get properties directly from D-Bus
-        let valid: bool = self.get_property(
-            config_path,
-            CONFIGURATION_INTERFACE,
-            "valid"
-        ).await.unwrap_or(true);
+        let valid: bool = self
+            .get_property(config_path, CONFIGURATION_INTERFACE, "valid")
+            .await
+            .unwrap_or(true);
 
-        let import_timestamp: u64 = self.get_property(
-            config_path,
-            CONFIGURATION_INTERFACE,
-            "import_timestamp"
-        ).await.unwrap_or(0);
+        let import_timestamp: u64 = self
+            .get_property(config_path, CONFIGURATION_INTERFACE, "import_timestamp")
+            .await
+            .unwrap_or(0);
 
-        let last_used_timestamp: u64 = self.get_property(
-            config_path,
-            CONFIGURATION_INTERFACE,
-            "last_used_timestamp"
-        ).await.unwrap_or(0);
+        let last_used_timestamp: u64 = self
+            .get_property(config_path, CONFIGURATION_INTERFACE, "last_used_timestamp")
+            .await
+            .unwrap_or(0);
 
-        let used_count: u32 = self.get_property(
-            config_path,
-            CONFIGURATION_INTERFACE,
-            "used_count"
-        ).await.unwrap_or(0);
+        let used_count: u32 = self
+            .get_property(config_path, CONFIGURATION_INTERFACE, "used_count")
+            .await
+            .unwrap_or(0);
 
         // Convert timestamps to readable strings
         let imported = if import_timestamp > 0 {
@@ -331,22 +346,36 @@ impl OpenVpnClient {
         use zbus::zvariant::OwnedValue;
 
         // Call Get method from org.freedesktop.DBus.Properties interface
-        let message = self.dbus_manager.connection.call_method(
-            Some(interface),
-            path,
-            Some("org.freedesktop.DBus.Properties"),
-            "Get",
-            &(interface, property),
-        ).await.map_err(|e| Error::DbusProperty(format!("Failed to get property {}: {}", property, e)))?;
+        let message = self
+            .dbus_manager
+            .connection
+            .call_method(
+                Some(interface),
+                path,
+                Some("org.freedesktop.DBus.Properties"),
+                "Get",
+                &(interface, property),
+            )
+            .await
+            .map_err(|e| {
+                Error::DbusProperty(format!("Failed to get property {}: {}", property, e))
+            })?;
 
         // D-Bus Properties.Get returns a Variant, deserialize to owned value
-        let variant: OwnedValue = message.body()
-            .deserialize()
-            .map_err(|e| Error::DbusProperty(format!("Failed to parse variant for property {}: {}", property, e)))?;
+        let variant: OwnedValue = message.body().deserialize().map_err(|e| {
+            Error::DbusProperty(format!(
+                "Failed to parse variant for property {}: {}",
+                property, e
+            ))
+        })?;
 
         // Extract the actual value from the variant
-        let value: T = T::try_from(variant)
-            .map_err(|e| Error::DbusProperty(format!("Failed to convert property {} from variant: {:?}", property, e)))?;
+        let value: T = T::try_from(variant).map_err(|e| {
+            Error::DbusProperty(format!(
+                "Failed to convert property {} from variant: {:?}",
+                property, e
+            ))
+        })?;
 
         Ok(value)
     }
@@ -361,7 +390,11 @@ impl OpenVpnClient {
     }
 
     /// Import a new VPN configuration file
-    pub async fn import_config(&self, path: impl AsRef<Path>, name: Option<&str>) -> Result<String> {
+    pub async fn import_config(
+        &self,
+        path: impl AsRef<Path>,
+        name: Option<&str>,
+    ) -> Result<String> {
         let path = path.as_ref();
 
         // Validate file exists
@@ -388,15 +421,21 @@ impl OpenVpnClient {
             .ok_or_else(|| Error::InvalidInput("Could not determine profile name".to_string()))?;
 
         // Call Import method on configuration manager
-        let response = self.dbus_manager.connection.call_method(
-            Some(CONFIGURATION_SERVICE),
-            CONFIGURATION_PATH,
-            Some(CONFIGURATION_INTERFACE),
-            "Import",
-            &(profile_name.as_str(), config_str.as_str(), false, true),
-        ).await.map_err(|e| Error::DbusMethod(format!("Failed to import config: {}", e)))?;
+        let response = self
+            .dbus_manager
+            .connection
+            .call_method(
+                Some(CONFIGURATION_SERVICE),
+                CONFIGURATION_PATH,
+                Some(CONFIGURATION_INTERFACE),
+                "Import",
+                &(profile_name.as_str(), config_str.as_str(), false, true),
+            )
+            .await
+            .map_err(|e| Error::DbusMethod(format!("Failed to import config: {}", e)))?;
 
-        let _config_path: OwnedObjectPath = response.body()
+        let _config_path: OwnedObjectPath = response
+            .body()
             .deserialize()
             .map_err(|e| Error::DbusMethod(format!("Failed to parse import response: {}", e)))?;
 
@@ -409,13 +448,17 @@ impl OpenVpnClient {
         let profile = self.get_profile(name).await?;
 
         // Call Remove method on the configuration object
-        self.dbus_manager.connection.call_method(
-            Some(CONFIGURATION_SERVICE),
-            profile.path.as_str(),
-            Some(CONFIGURATION_INTERFACE),
-            "Remove",
-            &(),
-        ).await.map_err(|e| Error::DbusMethod(format!("Failed to delete profile: {}", e)))?;
+        self.dbus_manager
+            .connection
+            .call_method(
+                Some(CONFIGURATION_SERVICE),
+                profile.path.as_str(),
+                Some(CONFIGURATION_INTERFACE),
+                "Remove",
+                &(),
+            )
+            .await
+            .map_err(|e| Error::DbusMethod(format!("Failed to delete profile: {}", e)))?;
 
         Ok(())
     }
@@ -429,15 +472,21 @@ impl OpenVpnClient {
         eprintln!("Creating new tunnel for profile: {}", profile_name);
 
         // Create a new tunnel (session)
-        let response = self.dbus_manager.connection.call_method(
-            Some(SESSION_SERVICE),
-            SESSIONS_PATH,
-            Some(SESSION_INTERFACE),
-            "NewTunnel",
-            &(ObjectPath::try_from(profile.path.as_str()).unwrap(),),
-        ).await.map_err(|e| Error::DbusMethod(format!("Failed to create tunnel: {}", e)))?;
+        let response = self
+            .dbus_manager
+            .connection
+            .call_method(
+                Some(SESSION_SERVICE),
+                SESSIONS_PATH,
+                Some(SESSION_INTERFACE),
+                "NewTunnel",
+                &(ObjectPath::try_from(profile.path.as_str()).unwrap(),),
+            )
+            .await
+            .map_err(|e| Error::DbusMethod(format!("Failed to create tunnel: {}", e)))?;
 
-        let session_path: OwnedObjectPath = response.body()
+        let session_path: OwnedObjectPath = response
+            .body()
             .deserialize()
             .map_err(|e| Error::DbusMethod(format!("Failed to parse session path: {}", e)))?;
 
@@ -452,15 +501,21 @@ impl OpenVpnClient {
         let mut inputs = Vec::new();
 
         // Query what inputs are needed from the session
-        let response = self.dbus_manager.connection.call_method(
-            Some(SESSION_SERVICE),
-            session_path,
-            Some(SESSION_INTERFACE),
-            "UserInputQueueGetTypeGroup",
-            &(),
-        ).await.map_err(|e| Error::DbusMethod(format!("Failed to get input queue: {}", e)))?;
+        let response = self
+            .dbus_manager
+            .connection
+            .call_method(
+                Some(SESSION_SERVICE),
+                session_path,
+                Some(SESSION_INTERFACE),
+                "UserInputQueueGetTypeGroup",
+                &(),
+            )
+            .await
+            .map_err(|e| Error::DbusMethod(format!("Failed to get input queue: {}", e)))?;
 
-        let type_groups: Vec<(u32, u32)> = response.body()
+        let type_groups: Vec<(u32, u32)> = response
+            .body()
             .deserialize()
             .map_err(|e| Error::DbusMethod(format!("Failed to parse type groups: {}", e)))?;
 
@@ -468,38 +523,58 @@ impl OpenVpnClient {
 
         // For each (type, group) pair, fetch required inputs
         for (input_type, input_group) in type_groups {
-            eprintln!("Processing input type={}, group={}", input_type, input_group);
+            eprintln!(
+                "Processing input type={}, group={}",
+                input_type, input_group
+            );
 
             // Check which slots need input for this type/group
-            let response = self.dbus_manager.connection.call_method(
-                Some(SESSION_SERVICE),
-                session_path,
-                Some(SESSION_INTERFACE),
-                "UserInputQueueCheck",
-                &(input_type, input_group),
-            ).await.map_err(|e| Error::DbusMethod(format!("Failed to check input queue: {}", e)))?;
+            let response = self
+                .dbus_manager
+                .connection
+                .call_method(
+                    Some(SESSION_SERVICE),
+                    session_path,
+                    Some(SESSION_INTERFACE),
+                    "UserInputQueueCheck",
+                    &(input_type, input_group),
+                )
+                .await
+                .map_err(|e| Error::DbusMethod(format!("Failed to check input queue: {}", e)))?;
 
-            let slot_ids: Vec<u32> = response.body()
+            let slot_ids: Vec<u32> = response
+                .body()
                 .deserialize()
                 .map_err(|e| Error::DbusMethod(format!("Failed to parse slot IDs: {}", e)))?;
 
             // For each slot, fetch details
             for slot_id in slot_ids {
-                let response = self.dbus_manager.connection.call_method(
-                    Some(SESSION_SERVICE),
-                    session_path,
-                    Some(SESSION_INTERFACE),
-                    "UserInputQueueFetch",
-                    &(input_type, input_group, slot_id),
-                ).await.map_err(|e| Error::DbusMethod(format!("Failed to fetch input details: {}", e)))?;
+                let response = self
+                    .dbus_manager
+                    .connection
+                    .call_method(
+                        Some(SESSION_SERVICE),
+                        session_path,
+                        Some(SESSION_INTERFACE),
+                        "UserInputQueueFetch",
+                        &(input_type, input_group, slot_id),
+                    )
+                    .await
+                    .map_err(|e| {
+                        Error::DbusMethod(format!("Failed to fetch input details: {}", e))
+                    })?;
 
-                let input_details: (u32, u32, u32, String, String, bool) = response.body()
-                    .deserialize()
-                    .map_err(|e| Error::DbusMethod(format!("Failed to parse input details: {}", e)))?;
+                let input_details: (u32, u32, u32, String, String, bool) =
+                    response.body().deserialize().map_err(|e| {
+                        Error::DbusMethod(format!("Failed to parse input details: {}", e))
+                    })?;
 
                 let (_, _, id, name, description, hidden) = input_details;
 
-                eprintln!("  Required input: name='{}', description='{}', hidden={}, id={}", name, description, hidden, id);
+                eprintln!(
+                    "  Required input: name='{}', description='{}', hidden={}, id={}",
+                    name, description, hidden, id
+                );
 
                 // Determine if this can be stored (not OTP/challenge)
                 let can_store = !name.to_lowercase().contains("otp")
@@ -522,7 +597,11 @@ impl OpenVpnClient {
     }
 
     /// Provide dynamic credentials to a session
-    pub async fn provide_dynamic_credentials(&self, session_path: &str, credentials: &DynamicCredentials) -> Result<()> {
+    pub async fn provide_dynamic_credentials(
+        &self,
+        session_path: &str,
+        credentials: &DynamicCredentials,
+    ) -> Result<()> {
         eprintln!("Providing {} credential values", credentials.values.len());
 
         // We need to fetch the inputs again to get type/group info for each ID
@@ -530,15 +609,25 @@ impl OpenVpnClient {
 
         for input in inputs {
             if let Some(value) = credentials.values.get(&input.unique_id()) {
-                eprintln!("  Providing '{}' for field '{}'", if input.hidden { "***" } else { value }, input.name);
+                eprintln!(
+                    "  Providing '{}' for field '{}'",
+                    if input.hidden { "***" } else { value },
+                    input.name
+                );
 
-                self.dbus_manager.connection.call_method(
-                    Some(SESSION_SERVICE),
-                    session_path,
-                    Some(SESSION_INTERFACE),
-                    "UserInputProvide",
-                    &(input.input_type, input.input_group, input.id, value.clone()),
-                ).await.map_err(|e| Error::DbusMethod(format!("Failed to provide {}: {}", input.name, e)))?;
+                self.dbus_manager
+                    .connection
+                    .call_method(
+                        Some(SESSION_SERVICE),
+                        session_path,
+                        Some(SESSION_INTERFACE),
+                        "UserInputProvide",
+                        &(input.input_type, input.input_group, input.id, value.clone()),
+                    )
+                    .await
+                    .map_err(|e| {
+                        Error::DbusMethod(format!("Failed to provide {}: {}", input.name, e))
+                    })?;
             }
         }
 
@@ -548,24 +637,32 @@ impl OpenVpnClient {
     /// Complete the connection after credentials are provided
     pub async fn connect_session(&self, session_path: &str) -> Result<()> {
         eprintln!("Calling Ready() to signal credentials provided");
-        let _: () = self.dbus_manager.connection.call_method(
-            Some(SESSION_SERVICE),
-            session_path,
-            Some(SESSION_INTERFACE),
-            "Ready",
-            &(),
-        ).await
+        let _: () = self
+            .dbus_manager
+            .connection
+            .call_method(
+                Some(SESSION_SERVICE),
+                session_path,
+                Some(SESSION_INTERFACE),
+                "Ready",
+                &(),
+            )
+            .await
             .and_then(|r| r.body().deserialize())
             .map_err(|e| Error::DbusMethod(format!("Failed to call Ready: {}", e)))?;
 
         eprintln!("Calling Connect()");
-        let _: () = self.dbus_manager.connection.call_method(
-            Some(SESSION_SERVICE),
-            session_path,
-            Some(SESSION_INTERFACE),
-            "Connect",
-            &(),
-        ).await
+        let _: () = self
+            .dbus_manager
+            .connection
+            .call_method(
+                Some(SESSION_SERVICE),
+                session_path,
+                Some(SESSION_INTERFACE),
+                "Connect",
+                &(),
+            )
+            .await
             .and_then(|r| r.body().deserialize())
             .map_err(|e| Error::DbusMethod(format!("Failed to connect session: {}", e)))?;
 
@@ -581,15 +678,21 @@ impl OpenVpnClient {
         let profile = self.get_profile(profile_name).await?;
 
         // Create a new tunnel (session)
-        let response = self.dbus_manager.connection.call_method(
-            Some(SESSION_SERVICE),
-            SESSIONS_PATH,
-            Some(SESSION_INTERFACE),
-            "NewTunnel",
-            &(ObjectPath::try_from(profile.path.as_str()).unwrap(),),
-        ).await.map_err(|e| Error::DbusMethod(format!("Failed to create tunnel: {}", e)))?;
+        let response = self
+            .dbus_manager
+            .connection
+            .call_method(
+                Some(SESSION_SERVICE),
+                SESSIONS_PATH,
+                Some(SESSION_INTERFACE),
+                "NewTunnel",
+                &(ObjectPath::try_from(profile.path.as_str()).unwrap(),),
+            )
+            .await
+            .map_err(|e| Error::DbusMethod(format!("Failed to create tunnel: {}", e)))?;
 
-        let session_path: OwnedObjectPath = response.body()
+        let session_path: OwnedObjectPath = response
+            .body()
             .deserialize()
             .map_err(|e| Error::DbusMethod(format!("Failed to parse session path: {}", e)))?;
 
@@ -598,13 +701,17 @@ impl OpenVpnClient {
         self.provide_credentials(&session_path, credentials).await?;
 
         // Start the connection
-        let _: () = self.dbus_manager.connection.call_method(
-            Some(SESSION_SERVICE),
-            session_path.as_str(),
-            Some(SESSION_INTERFACE),
-            "Connect",
-            &(),
-        ).await
+        let _: () = self
+            .dbus_manager
+            .connection
+            .call_method(
+                Some(SESSION_SERVICE),
+                session_path.as_str(),
+                Some(SESSION_INTERFACE),
+                "Connect",
+                &(),
+            )
+            .await
             .and_then(|r| r.body().deserialize())
             .map_err(|e| Error::DbusMethod(format!("Failed to connect session: {}", e)))?;
 
@@ -612,57 +719,85 @@ impl OpenVpnClient {
     }
 
     /// Provide user credentials to a session
-    async fn provide_credentials(&self, session_path: &OwnedObjectPath, credentials: &Credentials) -> Result<()> {
+    async fn provide_credentials(
+        &self,
+        session_path: &OwnedObjectPath,
+        credentials: &Credentials,
+    ) -> Result<()> {
         // Query what inputs are needed from the session
-        let response = self.dbus_manager.connection.call_method(
-            Some(SESSION_SERVICE),
-            session_path.as_str(),
-            Some(SESSION_INTERFACE),
-            "UserInputQueueGetTypeGroup",
-            &(),
-        ).await.map_err(|e| Error::DbusMethod(format!("Failed to get input queue: {}", e)))?;
+        let response = self
+            .dbus_manager
+            .connection
+            .call_method(
+                Some(SESSION_SERVICE),
+                session_path.as_str(),
+                Some(SESSION_INTERFACE),
+                "UserInputQueueGetTypeGroup",
+                &(),
+            )
+            .await
+            .map_err(|e| Error::DbusMethod(format!("Failed to get input queue: {}", e)))?;
 
-        let type_groups: Vec<(u32, u32)> = response.body()
+        let type_groups: Vec<(u32, u32)> = response
+            .body()
             .deserialize()
             .map_err(|e| Error::DbusMethod(format!("Failed to parse type groups: {}", e)))?;
 
         // For each (type, group) pair, fetch required inputs and provide values
         for (input_type, input_group) in type_groups {
             // Check which slots need input for this type/group
-            let response = self.dbus_manager.connection.call_method(
-                Some(SESSION_SERVICE),
-                session_path.as_str(),
-                Some(SESSION_INTERFACE),
-                "UserInputQueueCheck",
-                &(input_type, input_group),
-            ).await.map_err(|e| Error::DbusMethod(format!("Failed to check input queue: {}", e)))?;
+            let response = self
+                .dbus_manager
+                .connection
+                .call_method(
+                    Some(SESSION_SERVICE),
+                    session_path.as_str(),
+                    Some(SESSION_INTERFACE),
+                    "UserInputQueueCheck",
+                    &(input_type, input_group),
+                )
+                .await
+                .map_err(|e| Error::DbusMethod(format!("Failed to check input queue: {}", e)))?;
 
-            let slot_ids: Vec<u32> = response.body()
+            let slot_ids: Vec<u32> = response
+                .body()
                 .deserialize()
                 .map_err(|e| Error::DbusMethod(format!("Failed to parse slot IDs: {}", e)))?;
 
             // For each slot, fetch details and provide appropriate value
             for slot_id in slot_ids {
-                let response = self.dbus_manager.connection.call_method(
-                    Some(SESSION_SERVICE),
-                    session_path.as_str(),
-                    Some(SESSION_INTERFACE),
-                    "UserInputQueueFetch",
-                    &(input_type, input_group, slot_id),
-                ).await.map_err(|e| Error::DbusMethod(format!("Failed to fetch input details: {}", e)))?;
+                let response = self
+                    .dbus_manager
+                    .connection
+                    .call_method(
+                        Some(SESSION_SERVICE),
+                        session_path.as_str(),
+                        Some(SESSION_INTERFACE),
+                        "UserInputQueueFetch",
+                        &(input_type, input_group, slot_id),
+                    )
+                    .await
+                    .map_err(|e| {
+                        Error::DbusMethod(format!("Failed to fetch input details: {}", e))
+                    })?;
 
-                let input_details: (u32, u32, u32, String, String, bool) = response.body()
-                    .deserialize()
-                    .map_err(|e| Error::DbusMethod(format!("Failed to parse input details: {}", e)))?;
+                let input_details: (u32, u32, u32, String, String, bool) =
+                    response.body().deserialize().map_err(|e| {
+                        Error::DbusMethod(format!("Failed to parse input details: {}", e))
+                    })?;
 
                 let (_, _, id, name, _description, _hidden) = input_details;
 
                 // Match the input name to determine which credential to provide
-                let value = if name.to_lowercase().contains("user") || name.to_lowercase().contains("name") {
+                let value = if name.to_lowercase().contains("user")
+                    || name.to_lowercase().contains("name")
+                {
                     Some(&credentials.username)
                 } else if name.to_lowercase().contains("pass") {
                     Some(&credentials.password)
-                } else if name.to_lowercase().contains("otp") || name.to_lowercase().contains("challenge") {
+                } else if name.to_lowercase().contains("otp")
+                    || name.to_lowercase().contains("challenge")
+                {
                     credentials.totp.as_ref()
                 } else {
                     None
@@ -670,13 +805,19 @@ impl OpenVpnClient {
 
                 if let Some(value) = value {
                     // Provide the input value
-                    self.dbus_manager.connection.call_method(
-                        Some(SESSION_SERVICE),
-                        session_path.as_str(),
-                        Some(SESSION_INTERFACE),
-                        "UserInputProvide",
-                        &(input_type, input_group, id, value.clone()),
-                    ).await.map_err(|e| Error::DbusMethod(format!("Failed to provide {}: {}", name, e)))?;
+                    self.dbus_manager
+                        .connection
+                        .call_method(
+                            Some(SESSION_SERVICE),
+                            session_path.as_str(),
+                            Some(SESSION_INTERFACE),
+                            "UserInputProvide",
+                            &(input_type, input_group, id, value.clone()),
+                        )
+                        .await
+                        .map_err(|e| {
+                            Error::DbusMethod(format!("Failed to provide {}: {}", name, e))
+                        })?;
                 }
             }
         }
@@ -692,13 +833,19 @@ impl OpenVpnClient {
         for session in sessions {
             if session.profile_name == profile_name {
                 // Call Disconnect on the session
-                self.dbus_manager.connection.call_method(
-                    Some(SESSION_SERVICE),
-                    session.path.as_str(),
-                    Some(SESSION_INTERFACE),
-                    "Disconnect",
-                    &(),
-                ).await.map_err(|e| Error::DbusMethod(format!("Failed to disconnect session: {}", e)))?;
+                self.dbus_manager
+                    .connection
+                    .call_method(
+                        Some(SESSION_SERVICE),
+                        session.path.as_str(),
+                        Some(SESSION_INTERFACE),
+                        "Disconnect",
+                        &(),
+                    )
+                    .await
+                    .map_err(|e| {
+                        Error::DbusMethod(format!("Failed to disconnect session: {}", e))
+                    })?;
             }
         }
 
@@ -709,13 +856,17 @@ impl OpenVpnClient {
     pub async fn disconnect_session(&self, session_path: &str) -> Result<()> {
         eprintln!("Disconnecting session at: {}", session_path);
 
-        self.dbus_manager.connection.call_method(
-            Some(SESSION_SERVICE),
-            session_path,
-            Some(SESSION_INTERFACE),
-            "Disconnect",
-            &(),
-        ).await.map_err(|e| Error::DbusMethod(format!("Failed to disconnect session: {}", e)))?;
+        self.dbus_manager
+            .connection
+            .call_method(
+                Some(SESSION_SERVICE),
+                session_path,
+                Some(SESSION_INTERFACE),
+                "Disconnect",
+                &(),
+            )
+            .await
+            .map_err(|e| Error::DbusMethod(format!("Failed to disconnect session: {}", e)))?;
 
         eprintln!("Session disconnected successfully");
         Ok(())
@@ -727,22 +878,29 @@ impl OpenVpnClient {
         let profile = self.get_profile(profile_name).await?;
 
         // Fetch the configuration as JSON
-        let response = self.dbus_manager.connection.call_method(
-            Some(CONFIGURATION_SERVICE),
-            profile.path.as_str(),
-            Some(CONFIGURATION_INTERFACE),
-            "FetchJSON",
-            &(),
-        ).await.map_err(|e| Error::DbusMethod(format!("Failed to fetch config JSON: {}", e)))?;
+        let response = self
+            .dbus_manager
+            .connection
+            .call_method(
+                Some(CONFIGURATION_SERVICE),
+                profile.path.as_str(),
+                Some(CONFIGURATION_INTERFACE),
+                "FetchJSON",
+                &(),
+            )
+            .await
+            .map_err(|e| Error::DbusMethod(format!("Failed to fetch config JSON: {}", e)))?;
 
-        let json_str: String = response.body()
+        let json_str: String = response
+            .body()
             .deserialize()
             .map_err(|e| Error::DbusMethod(format!("Failed to parse JSON response: {}", e)))?;
 
         // Parse and check for TOTP/2FA requirements
         if let Ok(json_value) = serde_json::from_str::<serde_json::Value>(&json_str) {
             // Check various fields that might indicate TOTP requirement
-            let requires_totp = json_value.get("static-challenge")
+            let requires_totp = json_value
+                .get("static-challenge")
                 .and_then(|v| v.as_str())
                 .map(|s| s.to_lowercase().contains("otp") || s.to_lowercase().contains("2fa"))
                 .unwrap_or(false);
@@ -775,7 +933,7 @@ impl Clone for OpenVpnClient {
         Self {
             dbus_manager: AsyncDbusManager {
                 connection: self.dbus_manager.connection.clone(),
-            }
+            },
         }
     }
 }
@@ -811,16 +969,5 @@ mod tests {
 
         let with_totp = Credentials::new("user", "pass").with_totp("123456");
         assert_eq!(with_totp.format_for_stdin(), "user\npass\n123456\n");
-    }
-
-    #[test]
-    fn test_connection_status() {
-        assert!(ConnectionStatus::Connected.is_active());
-        assert!(ConnectionStatus::Connecting.is_active());
-        assert!(!ConnectionStatus::Disconnected.is_active());
-        assert!(!ConnectionStatus::Failed.is_active());
-
-        assert!(ConnectionStatus::Connecting.is_connecting());
-        assert!(!ConnectionStatus::Connected.is_connecting());
     }
 }
