@@ -26,9 +26,19 @@ impl OpenVpnClient {
         Ok(Self { dbus_manager })
     }
 
+    /// Check if OpenVPN 3 D-Bus services are available
     pub async fn is_available() -> bool {
         match AsyncDbusManager::new().await {
-            Ok(manager) => manager.is_available().await,
+            Ok(manager) => {
+                let is_available = manager.is_service_available(CONFIGURATION_SERVICE).await;
+                if !is_available {
+                    eprintln!(
+                        "OpenVPN 3 service '{}' not found in activatable services",
+                        CONFIGURATION_SERVICE
+                    );
+                }
+                is_available
+            }
             Err(e) => {
                 eprintln!("Failed to create D-Bus manager: {}", e);
                 false

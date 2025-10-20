@@ -3,14 +3,12 @@
 use super::error::{Error, Result};
 use zbus::Connection;
 
-/// D-Bus connection manager for OpenVPN3 services
 #[derive(Debug)]
 pub struct DbusManager {
     pub connection: Connection,
 }
 
 impl DbusManager {
-    /// Create a new D-Bus manager with system bus connection
     pub async fn new() -> Result<Self> {
         let connection = Connection::system().await.map_err(|e| {
             Error::DbusConnection(format!("Failed to connect to system bus: {}", e))
@@ -19,11 +17,15 @@ impl DbusManager {
         Ok(Self { connection })
     }
 
-    /// Check if OpenVPN3 services are available
-    pub async fn is_available(&self) -> bool {
-        // Check if the configuration manager service is activatable
-        // OpenVPN 3 services are D-Bus activated (start on-demand), so we check
-        // if they're in the list of activatable services rather than currently running
+    /// Check if a D-Bus service is available (activatable or running)
+    ///
+    /// # Arguments
+    /// * `service_name` - The D-Bus service name to check
+    ///
+    /// # Returns
+    /// * `true` if the service is activatable or currently running
+    /// * `false` if the service is not available
+    pub async fn is_service_available(&self, service_name: &str) -> bool {
         match self
             .connection
             .call_method(
@@ -37,11 +39,7 @@ impl DbusManager {
         {
             Ok(response) => {
                 let services: Vec<String> = response.body().deserialize().unwrap_or_default();
-                let is_available = services.contains(&"net.openvpn.v3.configuration".to_string());
-                if !is_available {
-                    eprintln!("OpenVPN3 service 'net.openvpn.v3.configuration' not found in activatable services");
-                }
-                is_available
+                services.contains(&service_name.to_string())
             }
             Err(e) => {
                 eprintln!("Failed to check D-Bus activatable services: {}", e);
@@ -51,5 +49,4 @@ impl DbusManager {
     }
 }
 
-/// Async D-Bus connection manager for OpenVPN3 services (alias for DbusManager)
 pub type AsyncDbusManager = DbusManager;
