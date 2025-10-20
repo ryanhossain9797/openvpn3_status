@@ -159,6 +159,7 @@ pub enum Message {
 
     // Client initialization
     ClientInitialized(Option<OpenVpnClient>),
+    RetryInitialization,
 
     // Profile operations
     RefreshProfiles,
@@ -280,6 +281,7 @@ impl Application for OpenVpn3Status {
             Message::TogglePopup => self.handle_toggle_popup(),
             Message::PopupClosed(id) => self.handle_popup_closed(id),
             Message::ClientInitialized(client) => self.handle_client_initialized(client),
+            Message::RetryInitialization => self.handle_retry_initialization(),
             Message::RefreshProfiles => self.handle_refresh_profiles(),
             Message::ProfilesLoaded(result) => self.handle_profiles_loaded(result),
             Message::DeleteProfile(name) => self.handle_delete_profile(name),
@@ -349,10 +351,14 @@ impl Application for OpenVpn3Status {
 // View methods
 impl OpenVpn3Status {
     fn view_unavailable(&self) -> Element<'_, Message> {
+        let retry_button = widget::button::standard("Retry").on_press(Message::RetryInitialization);
+
         let content = widget::column()
             .spacing(10)
             .padding(20)
-            .push(widget::text("OpenVPN 3 not available").size(16));
+            .push(widget::text("Connecting to OpenVPN 3...").size(16))
+            .push(widget::text("If this persists, check if OpenVPN 3 is installed").size(12))
+            .push(retry_button);
 
         self.core.applet.popup_container(content).into()
     }
@@ -503,10 +509,17 @@ impl OpenVpn3Status {
         if let Some(p) = self.popup.take() {
             destroy_popup(p)
         } else {
-            // Refresh when opening
+            // When opening, check state and handle accordingly
             let refresh_task = match &self.state {
-                AppState::Available { .. } => self.handle_refresh_profiles(),
-                AppState::Unavailable => Task::none(),
+                AppState::Available { .. } => {
+                    // Refresh profiles if already available
+                    self.handle_refresh_profiles()
+                }
+                AppState::Unavailable => {
+                    // Auto-retry initialization if service might be activatable
+                    eprintln!("OpenVPN not available, attempting auto-retry...");
+                    self.handle_retry_initialization()
+                }
             };
 
             let new_id = Id::unique();
@@ -542,6 +555,24 @@ impl OpenVpn3Status {
         } else {
             Task::none()
         }
+    }
+
+    fn handle_retry_initialization(&mut self) -> Task<Message> {
+        eprintln!("Retrying OpenVPN3 client initialization...");
+        Task::perform(
+            async {
+                let is_available = OpenVpnClient::is_available().await;
+                if is_available {
+                    match OpenVpnClient::new().await {
+                        Ok(client) => Some(client),
+                        Err(_) => None,
+                    }
+                } else {
+                    None
+                }
+            },
+            |client| cosmic::Action::App(Message::ClientInitialized(client)),
+        )
     }
 
     fn handle_refresh_profiles(&mut self) -> Task<Message> {

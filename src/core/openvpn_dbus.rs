@@ -29,7 +29,10 @@ impl OpenVpnClient {
     pub async fn is_available() -> bool {
         match AsyncDbusManager::new().await {
             Ok(manager) => manager.is_available().await,
-            Err(_) => false,
+            Err(e) => {
+                eprintln!("Failed to create D-Bus manager: {}", e);
+                false
+            }
         }
     }
 
@@ -54,33 +57,86 @@ impl OpenVpnClient {
 
     /// Fetch all configuration paths from the configuration manager
     async fn fetch_config_paths(&self) -> Result<Vec<OwnedObjectPath>> {
-        let response = self.dbus_manager.connection.call_method(
-            Some(CONFIGURATION_SERVICE),
-            CONFIGURATION_PATH,
-            Some(CONFIGURATION_INTERFACE),
-            "FetchAvailableConfigs",
-            &(),
-        ).await.map_err(|e| Error::DbusMethod(format!("Failed to fetch configs: {}", e)))?;
+        // Try to fetch configs with retry logic for service activation
+        let mut last_error = None;
 
-        let paths: Vec<OwnedObjectPath> = response.body()
-            .deserialize()
-            .map_err(|e| Error::DbusMethod(format!("Failed to parse config paths: {}", e)))?;
+        for attempt in 1..=3 {
+            match self.dbus_manager.connection.call_method(
+                Some(CONFIGURATION_SERVICE),
+                CONFIGURATION_PATH,
+                Some(CONFIGURATION_INTERFACE),
+                "FetchAvailableConfigs",
+                &(),
+            ).await {
+                Ok(response) => {
+                    let paths: Vec<OwnedObjectPath> = response.body()
+                        .deserialize()
+                        .map_err(|e| Error::DbusMethod(format!("Failed to parse config paths: {}", e)))?;
+                    return Ok(paths);
+                }
+                Err(e) => {
+                    let error_msg = e.to_string();
 
-        Ok(paths)
+                    // If the service is not activated yet, wait and retry
+                    if error_msg.contains("UnknownMethod") || error_msg.contains("does not exist") {
+                        if attempt < 3 {
+                            eprintln!("OpenVPN3 service activating, retrying... (attempt {}/3)", attempt);
+                            tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
+                            last_error = Some(e);
+                            continue;
+                        }
+                    }
+
+                    last_error = Some(e);
+                    break;
+                }
+            }
+        }
+
+        Err(Error::DbusMethod(format!("Failed to fetch configs after retries: {}",
+            last_error.map(|e| e.to_string()).unwrap_or_else(|| "Unknown error".to_string()))))
     }
 
     /// Fetch all active sessions from the session manager
     pub async fn fetch_sessions(&self) -> Result<Vec<Session>> {
-        // Get all session paths by calling FetchAvailableSessions
-        let response = match self.dbus_manager.connection.call_method(
-            Some(SESSION_SERVICE),
-            SESSIONS_PATH,
-            Some(SESSION_INTERFACE),
-            "FetchAvailableSessions",
-            &(),
-        ).await {
-            Ok(r) => r,
-            Err(_) => return Ok(Vec::new()),
+        // Get all session paths by calling FetchAvailableSessions with retry logic
+        let mut response_result = None;
+
+        for attempt in 1..=3 {
+            match self.dbus_manager.connection.call_method(
+                Some(SESSION_SERVICE),
+                SESSIONS_PATH,
+                Some(SESSION_INTERFACE),
+                "FetchAvailableSessions",
+                &(),
+            ).await {
+                Ok(r) => {
+                    response_result = Some(r);
+                    break;
+                }
+                Err(e) => {
+                    let error_msg = e.to_string();
+
+                    // If the service is not activated yet, wait and retry
+                    if error_msg.contains("UnknownMethod") || error_msg.contains("does not exist") {
+                        if attempt < 3 {
+                            eprintln!("OpenVPN3 sessions service activating, retrying... (attempt {}/3)", attempt);
+                            tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
+                            continue;
+                        }
+                    }
+
+                    break;
+                }
+            }
+        }
+
+        let response = match response_result {
+            Some(r) => r,
+            None => {
+                eprintln!("No active sessions or session service not available");
+                return Ok(Vec::new());
+            }
         };
 
         let session_paths: Vec<OwnedObjectPath> = response.body()

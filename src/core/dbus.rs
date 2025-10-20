@@ -33,9 +33,16 @@ impl DbusManager {
         ).await {
             Ok(response) => {
                 let services: Vec<String> = response.body().deserialize().unwrap_or_default();
-                services.contains(&"net.openvpn.v3.configuration".to_string())
+                let is_available = services.contains(&"net.openvpn.v3.configuration".to_string());
+                if !is_available {
+                    eprintln!("OpenVPN3 service 'net.openvpn.v3.configuration' not found in activatable services");
+                }
+                is_available
             }
-            Err(_) => false,
+            Err(e) => {
+                eprintln!("Failed to check D-Bus activatable services: {}", e);
+                false
+            }
         }
     }
 
