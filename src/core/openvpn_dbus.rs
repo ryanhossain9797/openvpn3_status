@@ -576,11 +576,6 @@ impl OpenVpnClient {
                     name, description, hidden, id
                 );
 
-                // Determine if this can be stored (not OTP/challenge)
-                let can_store = !name.to_lowercase().contains("otp")
-                    && !name.to_lowercase().contains("challenge")
-                    && !name.to_lowercase().contains("token");
-
                 inputs.push(CredentialInput {
                     id,
                     input_type,
@@ -588,7 +583,6 @@ impl OpenVpnClient {
                     name,
                     description,
                     hidden,
-                    can_store,
                 });
             }
         }
@@ -596,11 +590,11 @@ impl OpenVpnClient {
         Ok(inputs)
     }
 
-    /// Provide dynamic credentials to a session
-    pub async fn provide_dynamic_credentials(
+    /// Provide credentials to a session
+    pub async fn provide_credentials(
         &self,
         session_path: &str,
-        credentials: &DynamicCredentials,
+        credentials: &Credentials,
     ) -> Result<()> {
         eprintln!("Providing {} credential values", credentials.values.len());
 
@@ -670,161 +664,6 @@ impl OpenVpnClient {
         Ok(())
     }
 
-    /// Start a VPN session with authentication (legacy - for backward compatibility)
-    pub async fn start_session(&self, profile_name: &str, credentials: &Credentials) -> Result<()> {
-        credentials.validate().map_err(Error::InvalidInput)?;
-
-        // Find the profile's D-Bus path
-        let profile = self.get_profile(profile_name).await?;
-
-        // Create a new tunnel (session)
-        let response = self
-            .dbus_manager
-            .connection
-            .call_method(
-                Some(SESSION_SERVICE),
-                SESSIONS_PATH,
-                Some(SESSION_INTERFACE),
-                "NewTunnel",
-                &(ObjectPath::try_from(profile.path.as_str()).unwrap(),),
-            )
-            .await
-            .map_err(|e| Error::DbusMethod(format!("Failed to create tunnel: {}", e)))?;
-
-        let session_path: OwnedObjectPath = response
-            .body()
-            .deserialize()
-            .map_err(|e| Error::DbusMethod(format!("Failed to parse session path: {}", e)))?;
-
-        // Provide user credentials via UserInputProvide method
-        // This is typically done through the backend client interface
-        self.provide_credentials(&session_path, credentials).await?;
-
-        // Start the connection
-        let _: () = self
-            .dbus_manager
-            .connection
-            .call_method(
-                Some(SESSION_SERVICE),
-                session_path.as_str(),
-                Some(SESSION_INTERFACE),
-                "Connect",
-                &(),
-            )
-            .await
-            .and_then(|r| r.body().deserialize())
-            .map_err(|e| Error::DbusMethod(format!("Failed to connect session: {}", e)))?;
-
-        Ok(())
-    }
-
-    /// Provide user credentials to a session
-    async fn provide_credentials(
-        &self,
-        session_path: &OwnedObjectPath,
-        credentials: &Credentials,
-    ) -> Result<()> {
-        // Query what inputs are needed from the session
-        let response = self
-            .dbus_manager
-            .connection
-            .call_method(
-                Some(SESSION_SERVICE),
-                session_path.as_str(),
-                Some(SESSION_INTERFACE),
-                "UserInputQueueGetTypeGroup",
-                &(),
-            )
-            .await
-            .map_err(|e| Error::DbusMethod(format!("Failed to get input queue: {}", e)))?;
-
-        let type_groups: Vec<(u32, u32)> = response
-            .body()
-            .deserialize()
-            .map_err(|e| Error::DbusMethod(format!("Failed to parse type groups: {}", e)))?;
-
-        // For each (type, group) pair, fetch required inputs and provide values
-        for (input_type, input_group) in type_groups {
-            // Check which slots need input for this type/group
-            let response = self
-                .dbus_manager
-                .connection
-                .call_method(
-                    Some(SESSION_SERVICE),
-                    session_path.as_str(),
-                    Some(SESSION_INTERFACE),
-                    "UserInputQueueCheck",
-                    &(input_type, input_group),
-                )
-                .await
-                .map_err(|e| Error::DbusMethod(format!("Failed to check input queue: {}", e)))?;
-
-            let slot_ids: Vec<u32> = response
-                .body()
-                .deserialize()
-                .map_err(|e| Error::DbusMethod(format!("Failed to parse slot IDs: {}", e)))?;
-
-            // For each slot, fetch details and provide appropriate value
-            for slot_id in slot_ids {
-                let response = self
-                    .dbus_manager
-                    .connection
-                    .call_method(
-                        Some(SESSION_SERVICE),
-                        session_path.as_str(),
-                        Some(SESSION_INTERFACE),
-                        "UserInputQueueFetch",
-                        &(input_type, input_group, slot_id),
-                    )
-                    .await
-                    .map_err(|e| {
-                        Error::DbusMethod(format!("Failed to fetch input details: {}", e))
-                    })?;
-
-                let input_details: (u32, u32, u32, String, String, bool) =
-                    response.body().deserialize().map_err(|e| {
-                        Error::DbusMethod(format!("Failed to parse input details: {}", e))
-                    })?;
-
-                let (_, _, id, name, _description, _hidden) = input_details;
-
-                // Match the input name to determine which credential to provide
-                let value = if name.to_lowercase().contains("user")
-                    || name.to_lowercase().contains("name")
-                {
-                    Some(&credentials.username)
-                } else if name.to_lowercase().contains("pass") {
-                    Some(&credentials.password)
-                } else if name.to_lowercase().contains("otp")
-                    || name.to_lowercase().contains("challenge")
-                {
-                    credentials.totp.as_ref()
-                } else {
-                    None
-                };
-
-                if let Some(value) = value {
-                    // Provide the input value
-                    self.dbus_manager
-                        .connection
-                        .call_method(
-                            Some(SESSION_SERVICE),
-                            session_path.as_str(),
-                            Some(SESSION_INTERFACE),
-                            "UserInputProvide",
-                            &(input_type, input_group, id, value.clone()),
-                        )
-                        .await
-                        .map_err(|e| {
-                            Error::DbusMethod(format!("Failed to provide {}: {}", name, e))
-                        })?;
-                }
-            }
-        }
-
-        Ok(())
-    }
-
     /// Disconnect all sessions for a profile
     pub async fn disconnect_profile(&self, profile_name: &str) -> Result<()> {
         // Fetch all sessions and find ones matching this profile
@@ -871,60 +710,6 @@ impl OpenVpnClient {
         eprintln!("Session disconnected successfully");
         Ok(())
     }
-
-    /// Check if a profile requires TOTP
-    pub async fn check_totp_required(&self, profile_name: &str) -> Result<bool> {
-        // Find the profile
-        let profile = self.get_profile(profile_name).await?;
-
-        // Fetch the configuration as JSON
-        let response = self
-            .dbus_manager
-            .connection
-            .call_method(
-                Some(CONFIGURATION_SERVICE),
-                profile.path.as_str(),
-                Some(CONFIGURATION_INTERFACE),
-                "FetchJSON",
-                &(),
-            )
-            .await
-            .map_err(|e| Error::DbusMethod(format!("Failed to fetch config JSON: {}", e)))?;
-
-        let json_str: String = response
-            .body()
-            .deserialize()
-            .map_err(|e| Error::DbusMethod(format!("Failed to parse JSON response: {}", e)))?;
-
-        // Parse and check for TOTP/2FA requirements
-        if let Ok(json_value) = serde_json::from_str::<serde_json::Value>(&json_str) {
-            // Check various fields that might indicate TOTP requirement
-            let requires_totp = json_value
-                .get("static-challenge")
-                .and_then(|v| v.as_str())
-                .map(|s| s.to_lowercase().contains("otp") || s.to_lowercase().contains("2fa"))
-                .unwrap_or(false);
-
-            Ok(requires_totp)
-        } else {
-            Ok(false)
-        }
-    }
-
-    /// Set up signal monitoring for real-time status updates
-    pub async fn setup_signal_monitoring(&self) -> Result<()> {
-        // Note: zbus signal handling is typically done through stream subscriptions
-        // This is a placeholder for the signal monitoring setup
-        // In a real implementation, you would set up signal streams here
-        Ok(())
-    }
-
-    /// Process incoming D-Bus signals for status updates
-    pub async fn process_signals(&self) -> Result<Vec<StatusUpdate>> {
-        // Note: This is a placeholder for signal processing
-        // In a real implementation, you would process signal streams here
-        Ok(Vec::new())
-    }
 }
 
 impl Clone for OpenVpnClient {
@@ -943,31 +728,5 @@ impl Default for OpenVpnClient {
         // This is a placeholder implementation
         // In practice, you would want to handle the async creation differently
         panic!("OpenVpnClient::default() is not supported. Use OpenVpnClient::new().await instead.")
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_credentials_validation() {
-        let valid = Credentials::new("user", "pass");
-        assert!(valid.validate().is_ok());
-
-        let empty_user = Credentials::new("", "pass");
-        assert!(empty_user.validate().is_err());
-
-        let empty_pass = Credentials::new("user", "");
-        assert!(empty_pass.validate().is_err());
-    }
-
-    #[test]
-    fn test_credentials_format() {
-        let basic = Credentials::new("user", "pass");
-        assert_eq!(basic.format_for_stdin(), "user\npass\n");
-
-        let with_totp = Credentials::new("user", "pass").with_totp("123456");
-        assert_eq!(with_totp.format_for_stdin(), "user\npass\n123456\n");
     }
 }

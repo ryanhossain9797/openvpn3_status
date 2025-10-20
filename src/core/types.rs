@@ -11,16 +11,6 @@ pub enum ConnectionStatus {
     Failed,
 }
 
-impl ConnectionStatus {
-    pub fn is_active(&self) -> bool {
-        matches!(self, Self::Connected | Self::Connecting)
-    }
-
-    pub fn is_connecting(&self) -> bool {
-        matches!(self, Self::Connecting)
-    }
-}
-
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Profile {
     pub name: String,
@@ -60,7 +50,6 @@ pub struct CredentialInput {
     pub name: String,
     pub description: String,
     pub hidden: bool,
-    pub can_store: bool,
 }
 
 impl CredentialInput {
@@ -73,11 +62,11 @@ impl CredentialInput {
 }
 
 #[derive(Debug, Clone)]
-pub struct DynamicCredentials {
+pub struct Credentials {
     pub values: HashMap<u32, String>,
 }
 
-impl DynamicCredentials {
+impl Credentials {
     pub fn new() -> Self {
         Self {
             values: HashMap::new(),
@@ -87,73 +76,4 @@ impl DynamicCredentials {
     pub fn add(&mut self, id: u32, value: String) {
         self.values.insert(id, value);
     }
-}
-
-#[derive(Debug, Clone)]
-pub struct Credentials {
-    pub username: String,
-    pub password: String,
-    pub totp: Option<String>,
-}
-
-impl Credentials {
-    pub fn new(username: impl Into<String>, password: impl Into<String>) -> Self {
-        Self {
-            username: username.into(),
-            password: password.into(),
-            totp: None,
-        }
-    }
-
-    pub fn with_totp(mut self, totp: impl Into<String>) -> Self {
-        self.totp = Some(totp.into());
-        self
-    }
-
-    pub fn validate(&self) -> Result<(), String> {
-        if self.username.trim().is_empty() {
-            return Err("Username cannot be empty".to_string());
-        }
-        if self.password.trim().is_empty() {
-            return Err("Password cannot be empty".to_string());
-        }
-        Ok(())
-    }
-
-    pub(crate) fn format_for_stdin(&self) -> String {
-        if let Some(ref totp) = self.totp {
-            format!("{}\n{}\n{}\n", self.username, self.password, totp)
-        } else {
-            format!("{}\n{}\n", self.username, self.password)
-        }
-    }
-}
-
-#[derive(Debug, Clone)]
-pub struct ProfileRequirements {
-    pub requires_totp: bool,
-}
-
-impl Default for ProfileRequirements {
-    fn default() -> Self {
-        Self {
-            requires_totp: false,
-        }
-    }
-}
-
-#[derive(Debug, Clone)]
-pub enum StatusUpdate {
-    SessionStatusChange {
-        session_path: String,
-        status: ConnectionStatus,
-    },
-
-    SessionClosed {
-        session_path: String,
-    },
-
-    ConfigChange {
-        config_path: String,
-    },
 }

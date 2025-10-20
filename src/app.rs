@@ -8,7 +8,7 @@ use cosmic::widget;
 use cosmic::{Application, Element};
 
 use crate::core::types::ConnectionStatus;
-use crate::core::{CredentialInput, DynamicCredentials, OpenVpnClient, Profile};
+use crate::core::{CredentialInput, Credentials, OpenVpnClient, Profile};
 use std::sync::Arc;
 
 const AUTO_REFRESH_INTERVAL_SECS: u64 = 3;
@@ -55,7 +55,7 @@ enum DialogState {
     #[default]
     Default,
     Import(ImportDialog),
-    DynamicConnect(DynamicConnectDialog),
+    Connect(ConnectDialog),
     WaitingForCredentialRequirements {
         profile_name: String,
         session_path: String,
@@ -78,24 +78,21 @@ impl ImportDialog {
     }
 }
 
-/// Dynamic credential dialog that shows fields based on server requirements
-struct DynamicConnectDialog {
-    id: Id,
+/// Credential dialog that shows fields based on server requirements
+struct ConnectDialog {
     profile_name: String,
     session_path: String,
     required_inputs: Vec<CredentialInput>,
     input_values: std::collections::HashMap<u32, String>,
 }
 
-impl DynamicConnectDialog {
+impl ConnectDialog {
     fn new(
-        id: Id,
         profile_name: String,
         session_path: String,
         required_inputs: Vec<CredentialInput>,
     ) -> Self {
         Self {
-            id,
             profile_name,
             session_path,
             required_inputs,
@@ -113,8 +110,8 @@ impl DynamicConnectDialog {
         })
     }
 
-    fn build_credentials(&self) -> DynamicCredentials {
-        let mut creds = DynamicCredentials::new();
+    fn build_credentials(&self) -> Credentials {
+        let mut creds = Credentials::new();
         for (id, value) in &self.input_values {
             creds.add(*id, value.clone());
         }
@@ -148,15 +145,15 @@ pub enum Message {
     SubmitImport,
     ConfigImported(Result<String, String>),
 
-    // Dynamic credential flow (event-driven like openvpn3-indicator)
+    // Credential flow (event-driven like openvpn3-indicator)
     StartTunnelCreation(String),                   // profile_name
     TunnelCreated(String, Result<String, String>), // profile_name, session_path
     CheckCredentialRequirements(String, String),   // profile_name, session_path
     CredentialRequirementsFetched(String, String, Result<Vec<CredentialInput>, String>), // profile_name, session_path, required_inputs
-    DynamicInputChanged(u32, String), // input_id, value
-    SubmitDynamicCredentials,
-    DynamicCredentialsProvided(Result<(), String>),
-    CancelDynamicConnect(String), // session_path - cancel and disconnect session
+    InputChanged(u32, String), // input_id, value
+    SubmitCredentials,
+    CredentialsProvided(Result<(), String>),
+    CancelConnect(String), // session_path - cancel and disconnect session
     SessionCancelled(Result<(), String>),
 
     // Auto-refresh
@@ -235,7 +232,7 @@ impl Application for OpenVpn3Status {
             AppState::Unavailable => self.view_unavailable(),
             AppState::Available { dialog, .. } => match dialog {
                 DialogState::Import(dialog) => self.view_import_dialog(dialog),
-                DialogState::DynamicConnect(dialog) => self.view_dynamic_connect_dialog(dialog),
+                DialogState::Connect(dialog) => self.view_connect_dialog(dialog),
                 DialogState::WaitingForCredentialRequirements { profile_name, .. } => {
                     self.view_waiting_dialog(profile_name)
                 }
@@ -270,7 +267,7 @@ impl Application for OpenVpn3Status {
             Message::SubmitImport => self.handle_submit_import(),
             Message::ConfigImported(result) => self.handle_config_imported(result),
 
-            // Dynamic credential flow handlers
+            // Credential flow handlers
             Message::StartTunnelCreation(profile_name) => {
                 self.handle_start_tunnel_creation(profile_name)
             }
@@ -283,17 +280,13 @@ impl Application for OpenVpn3Status {
             Message::CredentialRequirementsFetched(profile_name, session_path, result) => {
                 self.handle_credential_requirements_fetched(profile_name, session_path, result)
             }
-            Message::DynamicInputChanged(id, value) => {
-                self.handle_dynamic_input_changed(id, value);
+            Message::InputChanged(id, value) => {
+                self.handle_input_changed(id, value);
                 Task::none()
             }
-            Message::SubmitDynamicCredentials => self.handle_submit_dynamic_credentials(),
-            Message::DynamicCredentialsProvided(result) => {
-                self.handle_dynamic_credentials_provided(result)
-            }
-            Message::CancelDynamicConnect(session_path) => {
-                self.handle_cancel_dynamic_connect(session_path)
-            }
+            Message::SubmitCredentials => self.handle_submit_credentials(),
+            Message::CredentialsProvided(result) => self.handle_credentials_provided(result),
+            Message::CancelConnect(session_path) => self.handle_cancel_connect(session_path),
             Message::SessionCancelled(result) => self.handle_session_cancelled(result),
 
             Message::AutoRefresh => self.handle_auto_refresh(),
@@ -363,7 +356,7 @@ impl OpenVpn3Status {
                     .spacing(10)
             }
             ConnectionStatus::Disconnected | ConnectionStatus::Failed => {
-                // Use the new dynamic credential flow that queries server requirements
+                // Use the credential flow that queries server requirements
                 let connect_btn = widget::button::suggested("Connect")
                     .on_press(Message::StartTunnelCreation(profile.name.clone()));
                 let delete_btn = widget::button::destructive("Delete")
@@ -726,7 +719,7 @@ impl OpenVpn3Status {
         self.handle_refresh_profiles()
     }
 
-    // Dynamic credential flow handlers
+    // Credential flow handlers
     fn handle_start_tunnel_creation(&mut self, profile_name: String) -> Task<Message> {
         let client = self.client.clone();
         let profile_name_arc = Arc::new(profile_name);
@@ -831,10 +824,8 @@ impl OpenVpn3Status {
     ) -> Task<Message> {
         match result {
             Ok(inputs) => {
-                let id = Id::unique();
                 if let Some(dialog) = self.dialog_mut() {
-                    *dialog = DialogState::DynamicConnect(DynamicConnectDialog::new(
-                        id,
+                    *dialog = DialogState::Connect(ConnectDialog::new(
                         profile_name,
                         session_path,
                         inputs,
@@ -852,15 +843,15 @@ impl OpenVpn3Status {
         }
     }
 
-    fn handle_dynamic_input_changed(&mut self, id: u32, value: String) {
-        if let Some(DialogState::DynamicConnect(dialog)) = self.dialog_mut() {
+    fn handle_input_changed(&mut self, id: u32, value: String) {
+        if let Some(DialogState::Connect(dialog)) = self.dialog_mut() {
             dialog.input_values.insert(id, value);
         }
     }
 
-    fn handle_submit_dynamic_credentials(&mut self) -> Task<Message> {
+    fn handle_submit_credentials(&mut self) -> Task<Message> {
         let (session_path, credentials) = match self.dialog() {
-            Some(DialogState::DynamicConnect(dialog)) => {
+            Some(DialogState::Connect(dialog)) => {
                 if !dialog.is_valid() {
                     eprintln!("Please fill in all required fields");
                     return Task::none();
@@ -880,7 +871,7 @@ impl OpenVpn3Status {
                 match client {
                     Some(client) => {
                         client
-                            .provide_dynamic_credentials(&session_path, &credentials)
+                            .provide_credentials(&session_path, &credentials)
                             .await?;
                         client.connect_session(&session_path).await?;
                         Ok(())
@@ -891,17 +882,17 @@ impl OpenVpn3Status {
                 }
             },
             |result| {
-                cosmic::Action::App(Message::DynamicCredentialsProvided(
+                cosmic::Action::App(Message::CredentialsProvided(
                     result.map_err(|e| e.to_string()),
                 ))
             },
         )
     }
 
-    fn handle_dynamic_credentials_provided(&mut self, result: Result<(), String>) -> Task<Message> {
+    fn handle_credentials_provided(&mut self, result: Result<(), String>) -> Task<Message> {
         match result {
             Ok(_) => {
-                eprintln!("Successfully provided dynamic credentials and started session");
+                eprintln!("Successfully provided credentials and started session");
                 self.handle_refresh_profiles()
             }
             Err(e) => {
@@ -911,7 +902,7 @@ impl OpenVpn3Status {
         }
     }
 
-    fn handle_cancel_dynamic_connect(&mut self, session_path: String) -> Task<Message> {
+    fn handle_cancel_connect(&mut self, session_path: String) -> Task<Message> {
         // Close the dialog immediately
         if let Some(dialog) = self.dialog_mut() {
             *dialog = DialogState::Default;
@@ -950,7 +941,7 @@ impl OpenVpn3Status {
         }
     }
 
-    // View methods for dynamic dialog
+    // View methods for connect dialog
     fn view_waiting_dialog<'a>(&'a self, profile_name: &'a str) -> Element<'a, Message> {
         // Get the session_path from the dialog state
         let session_path =
@@ -962,8 +953,8 @@ impl OpenVpn3Status {
                 String::new()
             };
 
-        let cancel_button = widget::button::standard("Cancel")
-            .on_press(Message::CancelDynamicConnect(session_path));
+        let cancel_button =
+            widget::button::standard("Cancel").on_press(Message::CancelConnect(session_path));
 
         let content = widget::column()
             .spacing(10)
@@ -976,10 +967,7 @@ impl OpenVpn3Status {
         self.core.applet.popup_container(container).into()
     }
 
-    fn view_dynamic_connect_dialog<'a>(
-        &'a self,
-        dialog: &'a DynamicConnectDialog,
-    ) -> Element<'a, Message> {
+    fn view_connect_dialog<'a>(&'a self, dialog: &'a ConnectDialog) -> Element<'a, Message> {
         let mut content = widget::column()
             .push(widget::text(format!("Connect to {}", dialog.profile_name)))
             .spacing(10);
@@ -997,10 +985,10 @@ impl OpenVpn3Status {
             let text_input = if input.hidden {
                 widget::text_input(input_name, current_value)
                     .password()
-                    .on_input(move |v| Message::DynamicInputChanged(input_id, v))
+                    .on_input(move |v| Message::InputChanged(input_id, v))
             } else {
                 widget::text_input(input_name, current_value)
-                    .on_input(move |v| Message::DynamicInputChanged(input_id, v))
+                    .on_input(move |v| Message::InputChanged(input_id, v))
             };
 
             content = content.push(text_input);
@@ -1009,13 +997,13 @@ impl OpenVpn3Status {
         // Buttons
         let connect_enabled = dialog.is_valid();
         let connect_button = if connect_enabled {
-            widget::button::suggested("Connect").on_press(Message::SubmitDynamicCredentials)
+            widget::button::suggested("Connect").on_press(Message::SubmitCredentials)
         } else {
             widget::button::suggested("Connect")
         };
 
         let cancel_button = widget::button::standard("Cancel")
-            .on_press(Message::CancelDynamicConnect(dialog.session_path.clone()));
+            .on_press(Message::CancelConnect(dialog.session_path.clone()));
 
         let button_row = widget::row()
             .push(connect_button)
