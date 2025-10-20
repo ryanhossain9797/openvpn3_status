@@ -54,9 +54,6 @@ pub struct CredentialInput {
 
 impl CredentialInput {
     pub fn unique_id(&self) -> u32 {
-        // Combine type, group, and slot into a unique ID
-        // Formula: type * 1000000 + group * 1000 + slot
-        // This assumes type < 1000, group < 1000, and slot < 1000 (reasonable for OpenVPN)
         self.input_type * 1000000 + self.input_group * 1000 + self.id
     }
 }

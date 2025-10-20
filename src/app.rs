@@ -14,7 +14,6 @@ use std::sync::Arc;
 
 const AUTO_REFRESH_INTERVAL_SECS: u64 = 3;
 
-/// Main application state
 pub struct OpenVpn3Status {
     core: Core,
     popup: Option<Id>,
@@ -33,11 +32,8 @@ impl Default for OpenVpn3Status {
     }
 }
 
-/// Application state container
 enum AppState {
-    /// OpenVPN is not available on the system
     Unavailable,
-    /// OpenVPN is available
     Available {
         profiles: Vec<Profile>,
         dialog: DialogState,
@@ -50,7 +46,6 @@ impl Default for AppState {
     }
 }
 
-/// Dialog state management
 #[derive(Default)]
 enum DialogState {
     #[default]
@@ -79,7 +74,6 @@ impl ImportDialog {
     }
 }
 
-/// Credential dialog that shows fields based on server requirements
 struct ConnectDialog {
     profile_name: String,
     session_path: String,
@@ -102,7 +96,6 @@ impl ConnectDialog {
     }
 
     fn is_valid(&self) -> bool {
-        // All required inputs must have non-empty values
         self.required_inputs.iter().all(|input| {
             self.input_values
                 .get(&input.unique_id())
@@ -120,44 +113,32 @@ impl ConnectDialog {
     }
 }
 
-/// Application messages
 #[derive(Debug, Clone)]
 pub enum Message {
-    // Window management
     TogglePopup,
     PopupClosed(Id),
-
-    // Client initialization
     ClientInitialized(Option<OpenVpnClient>),
-
-    // Profile operations
     RefreshProfiles,
     ProfilesLoaded(Result<Vec<Profile>, String>),
     DeleteProfile(String),
     ProfileDeleted(String, Result<(), String>),
     DisconnectSession(String),
     SessionDisconnected(String, Result<(), String>),
-
-    // Import dialog
     OpenImportDialog,
     CloseImportDialog(Id),
     ImportFilePathChanged(String),
     ImportCustomNameChanged(String),
     SubmitImport,
     ConfigImported(Result<String, String>),
-
-    // Credential flow (event-driven like openvpn3-indicator)
-    StartTunnelCreation(String),                   // profile_name
-    TunnelCreated(String, Result<String, String>), // profile_name, session_path
-    CheckCredentialRequirements(String, String),   // profile_name, session_path
-    CredentialRequirementsFetched(String, String, Result<Vec<CredentialInput>, String>), // profile_name, session_path, required_inputs
-    InputChanged(u32, String), // input_id, value
+    StartTunnelCreation(String),
+    TunnelCreated(String, Result<String, String>),
+    CheckCredentialRequirements(String, String),
+    CredentialRequirementsFetched(String, String, Result<Vec<CredentialInput>, String>),
+    InputChanged(u32, String),
     SubmitCredentials,
     CredentialsProvided(Result<(), String>),
-    CancelConnect(String), // session_path - cancel and disconnect session
+    CancelConnect(String),
     SessionCancelled(Result<(), String>),
-
-    // Auto-refresh
     AutoRefresh,
 }
 
@@ -183,7 +164,6 @@ impl Application for OpenVpn3Status {
             state: AppState::default(),
         };
 
-        // Initialize async
         let task = Task::perform(
             async {
                 let is_available = OpenVpnClient::is_available().await;
@@ -267,8 +247,6 @@ impl Application for OpenVpn3Status {
             }
             Message::SubmitImport => self.handle_submit_import(),
             Message::ConfigImported(result) => self.handle_config_imported(result),
-
-            // Credential flow handlers
             Message::StartTunnelCreation(profile_name) => {
                 self.handle_start_tunnel_creation(profile_name)
             }
@@ -299,7 +277,6 @@ impl Application for OpenVpn3Status {
     }
 }
 
-// View methods
 impl OpenVpn3Status {
     fn view_unavailable(&self) -> Element<'_, Message> {
         let connecting_text = fl!("status-connecting");
@@ -326,10 +303,8 @@ impl OpenVpn3Status {
 
         let mut content = widget::column().spacing(10).padding(20);
 
-        // Header
         content = content.push(widget::text(title_text).size(18));
 
-        // Action buttons
         let refresh_button =
             widget::button::standard(refresh_text).on_press(Message::RefreshProfiles);
         let import_button =
@@ -341,7 +316,6 @@ impl OpenVpn3Status {
         content = content.push(button_row);
         content = content.push(widget::horizontal_space());
 
-        // Profiles list
         if profiles.is_empty() {
             content = content.push(widget::text(no_profiles_text));
         } else {
@@ -370,7 +344,6 @@ impl OpenVpn3Status {
                     .spacing(10)
             }
             ConnectionStatus::Disconnected | ConnectionStatus::Failed => {
-                // Use the credential flow that queries server requirements
                 let connect_btn = widget::button::suggested(connect_text)
                     .on_press(Message::StartTunnelCreation(profile.name.clone()));
                 let delete_btn = widget::button::destructive(delete_text)
@@ -391,7 +364,6 @@ impl OpenVpn3Status {
         let cancel_text = fl!("button-cancel");
         let title_text = fl!("import-title");
 
-        // Note: text_input placeholders need static strings, using English for now
         let file_path_input = widget::text_input("File path", &dialog.file_path)
             .on_input(Message::ImportFilePathChanged);
 
@@ -421,9 +393,7 @@ impl OpenVpn3Status {
     }
 }
 
-// Message handlers
 impl OpenVpn3Status {
-    /// Helper to get mutable reference to dialog if available
     fn dialog_mut(&mut self) -> Option<&mut DialogState> {
         match &mut self.state {
             AppState::Available { dialog, .. } => Some(dialog),
@@ -431,7 +401,6 @@ impl OpenVpn3Status {
         }
     }
 
-    /// Helper to get reference to dialog if available
     fn dialog(&self) -> Option<&DialogState> {
         match &self.state {
             AppState::Available { dialog, .. } => Some(dialog),
@@ -443,14 +412,9 @@ impl OpenVpn3Status {
         if let Some(p) = self.popup.take() {
             destroy_popup(p)
         } else {
-            // When opening, check state and handle accordingly
             let refresh_task = match &self.state {
-                AppState::Available { .. } => {
-                    // Refresh profiles if already available
-                    self.handle_refresh_profiles()
-                }
+                AppState::Available { .. } => self.handle_refresh_profiles(),
                 AppState::Unavailable => {
-                    // Auto-retry initialization if service might be activatable
                     eprintln!("OpenVPN not available, attempting auto-retry...");
                     Self::retry_initialization()
                 }
@@ -529,7 +493,6 @@ impl OpenVpn3Status {
                     .iter()
                     .any(|p| matches!(p.status, ConnectionStatus::Connecting));
 
-                // Preserve existing dialog state when updating profiles
                 match &mut self.state {
                     AppState::Available {
                         profiles: old_profiles,
@@ -567,7 +530,6 @@ impl OpenVpn3Status {
     }
 
     fn handle_delete_profile(&mut self, name: String) -> Task<Message> {
-        // Don't allow if dialog is open
         if !matches!(self.dialog(), Some(DialogState::Default)) {
             eprintln!("Cannot delete profile while dialog is open");
             return Task::none();
@@ -609,7 +571,6 @@ impl OpenVpn3Status {
     }
 
     fn handle_disconnect_session(&mut self, name: String) -> Task<Message> {
-        // Don't allow if dialog is open
         if !matches!(self.dialog(), Some(DialogState::Default)) {
             eprintln!("Cannot disconnect session while dialog is open");
             return Task::none();
@@ -649,7 +610,6 @@ impl OpenVpn3Status {
     }
 
     fn handle_open_import_dialog(&mut self) -> Task<Message> {
-        // Don't open if another dialog is open or OpenVPN unavailable
         let Some(dialog) = self.dialog_mut() else {
             return Task::none();
         };
@@ -770,7 +730,6 @@ impl OpenVpn3Status {
     ) -> Task<Message> {
         match result {
             Ok(session_path) => {
-                // Set waiting state
                 if let Some(dialog) = self.dialog_mut() {
                     *dialog = DialogState::WaitingForCredentialRequirements {
                         profile_name: profile_name.clone(),
@@ -778,13 +737,11 @@ impl OpenVpn3Status {
                     };
                 }
 
-                // Use Arc for shared ownership
                 let profile_name_arc = Arc::new(profile_name);
                 let session_path_arc = Arc::new(session_path);
                 let profile_name_for_msg = Arc::clone(&profile_name_arc);
                 let session_path_for_msg = Arc::clone(&session_path_arc);
 
-                // Poll for CFG_REQUIRE_USER state
                 Task::perform(
                     async move {
                         tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
@@ -922,12 +879,10 @@ impl OpenVpn3Status {
     }
 
     fn handle_cancel_connect(&mut self, session_path: String) -> Task<Message> {
-        // Close the dialog immediately
         if let Some(dialog) = self.dialog_mut() {
             *dialog = DialogState::Default;
         }
 
-        // Disconnect the session in the background
         let client = self.client.clone();
         Task::perform(
             async move {
@@ -954,19 +909,16 @@ impl OpenVpn3Status {
                     "Failed to disconnect session (may already be closed): {}",
                     e
                 );
-                // Refresh anyway to update the UI
                 self.handle_refresh_profiles()
             }
         }
     }
 
-    // View methods for connect dialog
     fn view_waiting_dialog<'a>(&'a self, profile_name: &'a str) -> Element<'a, Message> {
         let cancel_text = fl!("button-cancel");
         let connecting_text = fl!("profile-connecting", name = profile_name.to_string());
         let waiting_text = fl!("status-waiting");
 
-        // Get the session_path from the dialog state
         let session_path =
             if let Some(DialogState::WaitingForCredentialRequirements { session_path, .. }) =
                 self.dialog()
@@ -997,7 +949,6 @@ impl OpenVpn3Status {
 
         let mut content = widget::column().push(widget::text(title_text)).spacing(10);
 
-        // Build input fields dynamically based on server requirements
         for input in &dialog.required_inputs {
             let input_id = input.unique_id();
             let input_name = input.name.clone();
@@ -1019,7 +970,6 @@ impl OpenVpn3Status {
             content = content.push(text_input);
         }
 
-        // Buttons
         let connect_enabled = dialog.is_valid();
         let connect_button = if connect_enabled {
             widget::button::suggested(connect_text).on_press(Message::SubmitCredentials)
@@ -1037,7 +987,6 @@ impl OpenVpn3Status {
 
         content = content.push(button_row).padding(20);
 
-        // Dynamic height based on number of fields
         let height = 150.0 + (dialog.required_inputs.len() as f32 * 50.0);
         let container = widget::container(content).width(400.0).height(height);
 

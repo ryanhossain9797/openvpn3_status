@@ -17,14 +17,6 @@ impl DbusManager {
         Ok(Self { connection })
     }
 
-    /// Check if a D-Bus service is available (activatable or running)
-    ///
-    /// # Arguments
-    /// * `service_name` - The D-Bus service name to check
-    ///
-    /// # Returns
-    /// * `true` if the service is activatable or currently running
-    /// * `false` if the service is not available
     pub async fn is_service_available(&self, service_name: &str) -> bool {
         match self
             .connection

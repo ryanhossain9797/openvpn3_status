@@ -2,25 +2,16 @@
 
 use std::fmt;
 
-/// Result type alias for OpenVPN operations
 pub type Result<T> = std::result::Result<T, Error>;
 
-/// Error types for OpenVPN operations
 #[derive(Debug, Clone)]
 pub enum Error {
-    /// Failed to execute OpenVPN command
     CommandExecution(String),
-    /// Failed to parse JSON output
     JsonParse(String),
-    /// Profile not found
     ProfileNotFound(String),
-    /// Invalid input
     InvalidInput(String),
-    /// D-Bus connection error
     DbusConnection(String),
-    /// D-Bus method call error
     DbusMethod(String),
-    /// D-Bus property access error
     DbusProperty(String),
 }
 
